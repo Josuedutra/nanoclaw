@@ -32,7 +32,25 @@ export type TaskState = (typeof TaskStates)[number];
 export const GateTypes = ['None', 'Security', 'RevOps', 'Claims', 'Product'] as const;
 export type GateType = (typeof GateTypes)[number];
 
+export const GovScopes = ['COMPANY', 'PRODUCT'] as const;
+export type GovScope = (typeof GovScopes)[number];
+
+export const ProductStatuses = ['active', 'paused', 'killed'] as const;
+export type ProductStatus = (typeof ProductStatuses)[number];
+
+export const RiskLevels = ['low', 'normal', 'high'] as const;
+export type RiskLevel = (typeof RiskLevels)[number];
+
 // --- SQLite row types ---
+
+export interface Product {
+  id: string;
+  name: string;
+  status: ProductStatus;
+  risk_level: RiskLevel;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface GovTask {
   id: string;
@@ -41,7 +59,10 @@ export interface GovTask {
   task_type: string;
   state: TaskState;
   priority: string;
+  /** @deprecated Use product_id instead. Kept for backward compatibility. */
   product: string | null;
+  product_id: string | null;
+  scope: GovScope;
   assigned_group: string | null;
   executor: string | null;
   created_by: string;

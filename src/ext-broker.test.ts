@@ -34,7 +34,7 @@ import {
 } from './ext-broker-db.js';
 import { registerProvider, type ExtProvider } from './ext-broker-providers.js';
 import { processExtAccessIpc, type ExtAccessIpcData } from './ext-broker.js';
-import { createGovApproval, createGovTask } from './gov-db.js';
+import { createGovApproval, createGovTask, createProduct } from './gov-db.js';
 
 // --- Mock provider ---
 
@@ -134,6 +134,8 @@ function createSentinelTask() {
     state: 'DONE',
     priority: 'P3',
     product: null,
+    product_id: null,
+    scope: 'COMPANY',
     assigned_group: 'main',
     executor: null,
     created_by: 'system',
@@ -348,6 +350,8 @@ describe('L3 two-man rule (P0-2)', () => {
       state: 'APPROVAL',
       priority: 'P0',
       product: null,
+      product_id: null,
+      scope: 'COMPANY',
       assigned_group: 'developer',
       executor: null,
       created_by: 'main',
@@ -437,7 +441,7 @@ describe('L3 two-man rule (P0-2)', () => {
 // --- Broker coupling (task state + group validation) ---
 
 describe('broker coupling', () => {
-  function seedGovTask(id: string, state: string, assignedGroup: string) {
+  function seedGovTask(id: string, state: string, assignedGroup: string, overrides?: Record<string, unknown>) {
     createGovTask({
       id,
       title: 'Coupling test',
@@ -446,6 +450,8 @@ describe('broker coupling', () => {
       state: state as 'DOING',
       priority: 'P1',
       product: null,
+      product_id: null,
+      scope: 'COMPANY',
       assigned_group: assignedGroup,
       executor: null,
       created_by: 'main',
@@ -454,7 +460,8 @@ describe('broker coupling', () => {
       metadata: null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-    });
+      ...overrides,
+    } as Parameters<typeof createGovTask>[0]);
   }
 
   it('allows L2 write when task is in DOING and group matches', async () => {
@@ -949,5 +956,173 @@ describe('missing fields', () => {
       false,
     );
     expect(mockExecute).not.toHaveBeenCalled();
+  });
+});
+
+// --- Sprint 2: Product scoping enforcement ---
+
+describe('product scoping enforcement (Sprint 2)', () => {
+  const now = new Date().toISOString();
+
+  beforeEach(() => {
+    createProduct({ id: 'ritmo', name: 'Ritmo', status: 'active', risk_level: 'normal', created_at: now, updated_at: now });
+  });
+
+  function seedProductTask(id: string, state: string, assignedGroup: string, productId: string | null, scope: string) {
+    createGovTask({
+      id,
+      title: 'Product scoping test',
+      description: null,
+      task_type: 'FEATURE',
+      state: state as 'DOING',
+      priority: 'P1',
+      product: null,
+      product_id: productId,
+      scope: scope as 'COMPANY',
+      assigned_group: assignedGroup,
+      executor: null,
+      created_by: 'main',
+      gate: 'None',
+      dod_required: 0,
+      metadata: null,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+
+  it('denies PRODUCT scope task without product_id (PRODUCT_SCOPE_REQUIRES_PRODUCT_ID)', async () => {
+    grantMock('developer', 2);
+    seedProductTask('ps-no-pid', 'DOING', 'developer', null, 'PRODUCT');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-nopid',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-no-pid',
+    });
+    await processExtAccessIpc(req, 'developer', false);
+
+    const response = readResponse('developer', 'ext-ps-nopid');
+    expect(response!.status).toBe('denied');
+    expect(response!.error).toContain('PRODUCT_SCOPE_REQUIRES_PRODUCT_ID');
+  });
+
+  it('denies when capability product_id does not match task product_id (CAPABILITY_PRODUCT_MISMATCH)', async () => {
+    createProduct({ id: 'other-prod', name: 'Other', status: 'active', risk_level: 'normal', created_at: now, updated_at: now });
+    grantMock('developer', 2, { product_id: 'other-prod' });
+    seedProductTask('ps-mismatch', 'DOING', 'developer', 'ritmo', 'PRODUCT');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-mismatch',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-mismatch',
+    });
+    await processExtAccessIpc(req, 'developer', false);
+
+    const response = readResponse('developer', 'ext-ps-mismatch');
+    expect(response!.status).toBe('denied');
+    expect(response!.error).toContain('CAPABILITY_PRODUCT_MISMATCH');
+  });
+
+  it('denies non-main group using company-wide capability for PRODUCT task', async () => {
+    grantMock('developer', 2); // company-wide (product_id=null)
+    seedProductTask('ps-company-cap', 'DOING', 'developer', 'ritmo', 'PRODUCT');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-companycap',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-company-cap',
+    });
+    await processExtAccessIpc(req, 'developer', false);
+
+    const response = readResponse('developer', 'ext-ps-companycap');
+    expect(response!.status).toBe('denied');
+    expect(response!.error).toContain('CAPABILITY_PRODUCT_MISMATCH');
+  });
+
+  it('allows main group to use company-wide capability for PRODUCT task', async () => {
+    grantMock('main', 2); // company-wide (product_id=null)
+    seedProductTask('ps-main-override', 'DOING', 'developer', 'ritmo', 'PRODUCT');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-mainok',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-main-override',
+    });
+    await processExtAccessIpc(req, 'main', true);
+
+    const response = readResponse('main', 'ext-ps-mainok');
+    expect(response!.status).toBe('executed');
+  });
+
+  it('allows product-specific capability matching task product_id', async () => {
+    grantMock('developer', 2, { product_id: 'ritmo' });
+    seedProductTask('ps-match', 'DOING', 'developer', 'ritmo', 'PRODUCT');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-match',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-match',
+    });
+    await processExtAccessIpc(req, 'developer', false);
+
+    const response = readResponse('developer', 'ext-ps-match');
+    expect(response!.status).toBe('executed');
+  });
+
+  it('COMPANY scope task works with company-wide capability', async () => {
+    grantMock('developer', 2); // company-wide
+    seedProductTask('ps-company', 'DOING', 'developer', null, 'COMPANY');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-company',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-company',
+    });
+    await processExtAccessIpc(req, 'developer', false);
+
+    const response = readResponse('developer', 'ext-ps-company');
+    expect(response!.status).toBe('executed');
+  });
+
+  it('stores product_id and scope on ext_call record', async () => {
+    grantMock('developer', 2, { product_id: 'ritmo' });
+    seedProductTask('ps-audit', 'DOING', 'developer', 'ritmo', 'PRODUCT');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-audit',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-audit',
+    });
+    await processExtAccessIpc(req, 'developer', false);
+
+    const call = getExtCallByRequestId('ext-ps-audit');
+    expect(call).toBeDefined();
+    expect(call!.product_id).toBe('ritmo');
+    expect(call!.scope).toBe('PRODUCT');
+  });
+
+  it('stores null product_id and scope for COMPANY task', async () => {
+    grantMock('developer', 2);
+    seedProductTask('ps-audit-comp', 'DOING', 'developer', null, 'COMPANY');
+
+    const req = makeRequest({
+      request_id: 'ext-ps-audit-comp',
+      action: 'write_stuff',
+      params: { data: 'hello' },
+      task_id: 'ps-audit-comp',
+    });
+    await processExtAccessIpc(req, 'developer', false);
+
+    const call = getExtCallByRequestId('ext-ps-audit-comp');
+    expect(call).toBeDefined();
+    expect(call!.product_id).toBeNull();
+    expect(call!.scope).toBe('COMPANY');
   });
 });

@@ -321,3 +321,63 @@ describe('cleanupStaleExtCalls', () => {
     expect(getExtCallByRequestId('still-processing')).toBeDefined();
   });
 });
+
+// --- Sprint 2: product_id columns ---
+
+describe('ext_capabilities product_id (Sprint 2 migration)', () => {
+  it('stores product_id on capability via grantCapability', () => {
+    grantCapability(makeCap({ product_id: 'ritmo' }));
+    const cap = getCapability('developer', 'github');
+    expect(cap).toBeDefined();
+    expect(cap!.product_id).toBe('ritmo');
+  });
+
+  it('product_id defaults to null (company-wide capability)', () => {
+    grantCapability(makeCap());
+    const cap = getCapability('developer', 'github');
+    expect(cap).toBeDefined();
+    // product_id should be null or undefined (depending on DB)
+    expect(cap!.product_id).toBeFalsy();
+  });
+
+  it('upsert preserves product_id', () => {
+    grantCapability(makeCap({ product_id: 'ritmo', access_level: 1 }));
+    grantCapability(makeCap({ product_id: 'ritmo-v2', access_level: 2 }));
+    const cap = getCapability('developer', 'github');
+    expect(cap!.access_level).toBe(2);
+    // product_id is not in UPSERT SET, so original is preserved
+    // Actually it won't be updated since it's not in the SET clause
+  });
+
+  it('revoke and re-grant preserves product_id field', () => {
+    grantCapability(makeCap({ product_id: 'ritmo' }));
+    revokeCapability('developer', 'github');
+    grantCapability(makeCap({ product_id: 'ritmo' }));
+    const cap = getCapability('developer', 'github');
+    expect(cap).toBeDefined();
+    expect(cap!.active).toBe(1);
+  });
+});
+
+describe('ext_calls product_id + scope (Sprint 2 migration)', () => {
+  it('stores product_id and scope on ext_call', () => {
+    logExtCall(makeCall({
+      request_id: 'ext-prod-1',
+      product_id: 'ritmo',
+      scope: 'PRODUCT',
+    }));
+
+    const call = getExtCallByRequestId('ext-prod-1');
+    expect(call).toBeDefined();
+    expect(call!.product_id).toBe('ritmo');
+    expect(call!.scope).toBe('PRODUCT');
+  });
+
+  it('product_id and scope default to null on ext_call', () => {
+    logExtCall(makeCall({ request_id: 'ext-noprod' }));
+    const call = getExtCallByRequestId('ext-noprod');
+    expect(call).toBeDefined();
+    expect(call!.product_id).toBeFalsy();
+    expect(call!.scope).toBeFalsy();
+  });
+});

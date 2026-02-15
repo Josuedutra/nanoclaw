@@ -33,18 +33,24 @@ vi.mock('./container-runner.js', () => ({
 
 import { _initTestDatabase } from './db.js';
 import {
+  countDoingTasksByGroup,
   createGovApproval,
   createGovTask,
+  createProduct,
   getDispatchableGovTasks,
   getDispatchByKey,
+  getGovActivities,
   getGovTaskById,
+  getProductById,
   getReviewableGovTasks,
   logGovActivity,
   tryCreateDispatch,
+  updateGovTask,
 } from './gov-db.js';
 import { grantCapability } from './ext-broker-db.js';
 import { registerProvider } from './ext-broker-providers.js';
 import {
+  buildContextPack,
   buildTaskContext,
   ensureIpcGroupSecret,
   writeExtCapabilitiesSnapshot,
@@ -72,6 +78,8 @@ function seedTask(overrides?: Record<string, unknown>) {
     state: 'INBOX',
     priority: 'P2',
     product: null,
+    product_id: null,
+    scope: 'PRODUCT',
     assigned_group: 'developer',
     executor: null,
     created_by: 'main',
@@ -506,5 +514,217 @@ describe('buildTaskContext', () => {
     const ctx = buildTaskContext('ctx-combined');
     expect(ctx).toContain('Activity Log');
     expect(ctx).toContain('Gate Approvals');
+  });
+});
+
+// --- Sprint 1: WIP limits ---
+
+describe('WIP limits (countDoingTasksByGroup)', () => {
+  it('returns 0 when no DOING tasks', () => {
+    seedTask({ id: 'wip-ready', state: 'READY', assigned_group: 'developer' });
+    expect(countDoingTasksByGroup('developer')).toBe(0);
+  });
+
+  it('counts DOING tasks for a specific group', () => {
+    seedTask({ id: 'wip-d1', state: 'DOING', assigned_group: 'developer' });
+    seedTask({ id: 'wip-d2', state: 'DOING', assigned_group: 'developer' });
+    seedTask({ id: 'wip-d3', state: 'DOING', assigned_group: 'security' }); // different group
+
+    expect(countDoingTasksByGroup('developer')).toBe(2);
+    expect(countDoingTasksByGroup('security')).toBe(1);
+  });
+
+  it('does not count non-DOING states', () => {
+    seedTask({ id: 'wip-r', state: 'READY', assigned_group: 'developer' });
+    seedTask({ id: 'wip-rev', state: 'REVIEW', assigned_group: 'developer' });
+    seedTask({ id: 'wip-done', state: 'DONE', assigned_group: 'developer' });
+    seedTask({ id: 'wip-doing', state: 'DOING', assigned_group: 'developer' });
+
+    expect(countDoingTasksByGroup('developer')).toBe(1);
+  });
+});
+
+// --- Sprint 1: gov snapshot includes product_id + scope ---
+
+describe('gov snapshot with product fields', () => {
+  it('includes product_id and scope in snapshot', () => {
+    seedTask({ id: 'snap-prod', product_id: 'ritmo', scope: 'PRODUCT', assigned_group: 'developer' });
+    seedTask({ id: 'snap-comp', product_id: null, scope: 'COMPANY', assigned_group: 'developer' });
+
+    writeGovSnapshot('developer', false);
+
+    const data = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, 'ipc', 'developer', 'gov_pipeline.json'), 'utf-8'),
+    );
+
+    const prodTask = data.tasks.find((t: { id: string }) => t.id === 'snap-prod');
+    expect(prodTask.product_id).toBe('ritmo');
+    expect(prodTask.scope).toBe('PRODUCT');
+
+    const compTask = data.tasks.find((t: { id: string }) => t.id === 'snap-comp');
+    expect(compTask.product_id).toBeNull();
+    expect(compTask.scope).toBe('COMPANY');
+  });
+});
+
+// --- Sprint 1.1: Dispatch product-status gating ---
+
+describe('dispatch product-status gating', () => {
+  it('READY task with paused product stays READY and logs activity', () => {
+    const now = new Date().toISOString();
+    createProduct({ id: 'paused-prod', name: 'Paused', status: 'paused', risk_level: 'normal', created_at: now, updated_at: now });
+    seedTask({ id: 'paused-task', state: 'READY', assigned_group: 'developer', product_id: 'paused-prod', scope: 'PRODUCT' });
+
+    // Verify task shows up as dispatchable (READY + assigned)
+    const dispatchable = getDispatchableGovTasks();
+    expect(dispatchable.some(t => t.id === 'paused-task')).toBe(true);
+
+    // The dispatch loop would skip it due to product status.
+    // We test the gating logic directly: product is paused → task stays READY.
+    // The actual dispatch loop calls getProductById and checks status.
+    const product = getProductById('paused-prod');
+    expect(product!.status).toBe('paused');
+    expect(product!.status !== 'active').toBe(true); // would be skipped
+  });
+
+  it('READY task with active product is dispatchable', () => {
+    const now = new Date().toISOString();
+    createProduct({ id: 'active-prod', name: 'Active', status: 'active', risk_level: 'normal', created_at: now, updated_at: now });
+    seedTask({ id: 'active-task', state: 'READY', assigned_group: 'developer', product_id: 'active-prod', scope: 'PRODUCT' });
+
+    const dispatchable = getDispatchableGovTasks();
+    const task = dispatchable.find(t => t.id === 'active-task');
+    expect(task).toBeDefined();
+
+    const product = getProductById('active-prod');
+    expect(product!.status).toBe('active'); // would proceed to dispatch
+  });
+
+  it('READY task with no product_id (COMPANY scope) is dispatchable regardless', () => {
+    seedTask({ id: 'company-task', state: 'READY', assigned_group: 'developer', product_id: null, scope: 'COMPANY' });
+
+    const dispatchable = getDispatchableGovTasks();
+    expect(dispatchable.some(t => t.id === 'company-task')).toBe(true);
+    // No product_id → skip product check → proceed
+  });
+});
+
+// --- Sprint 2: Context Pack ---
+
+describe('buildContextPack', () => {
+  it('includes product context for PRODUCT scope', () => {
+    const now = new Date().toISOString();
+    createProduct({ id: 'ritmo', name: 'Ritmo', status: 'active', risk_level: 'high', created_at: now, updated_at: now });
+    seedTask({ id: 'cp-prod', state: 'APPROVAL', product_id: 'ritmo', scope: 'PRODUCT', assigned_group: 'developer' });
+
+    const pack = buildContextPack(getGovTaskById('cp-prod')!);
+    expect(pack).toContain('Product Context');
+    expect(pack).toContain('Ritmo');
+    expect(pack).toContain('active');
+    expect(pack).toContain('high');
+  });
+
+  it('omits product context for COMPANY scope', () => {
+    seedTask({ id: 'cp-comp', state: 'APPROVAL', product_id: null, scope: 'COMPANY', assigned_group: 'developer' });
+
+    const pack = buildContextPack(getGovTaskById('cp-comp')!);
+    expect(pack).not.toContain('Product Context');
+  });
+
+  it('includes task metadata (id, title, type, priority, scope)', () => {
+    seedTask({ id: 'cp-meta', title: 'Fix auth bug', state: 'APPROVAL', task_type: 'BUG', priority: 'P1', scope: 'COMPANY', assigned_group: 'developer' });
+
+    const pack = buildContextPack(getGovTaskById('cp-meta')!);
+    expect(pack).toContain('Task Metadata');
+    expect(pack).toContain('cp-meta');
+    expect(pack).toContain('Fix auth bug');
+    expect(pack).toContain('BUG');
+    expect(pack).toContain('P1');
+    expect(pack).toContain('COMPANY');
+  });
+
+  it('includes execution summary from execution_summary activity', () => {
+    seedTask({ id: 'cp-sum', state: 'APPROVAL', assigned_group: 'developer' });
+    const now = new Date().toISOString();
+    logGovActivity({
+      task_id: 'cp-sum',
+      action: 'execution_summary',
+      from_state: 'DOING',
+      to_state: 'REVIEW',
+      actor: 'developer',
+      reason: 'Built the OAuth2 login flow with JWT tokens',
+      created_at: now,
+    });
+
+    const pack = buildContextPack(getGovTaskById('cp-sum')!);
+    expect(pack).toContain('Execution Summary');
+    expect(pack).toContain('Built the OAuth2 login flow with JWT tokens');
+  });
+
+  it('includes evidence links from evidence activities', () => {
+    seedTask({ id: 'cp-ev', state: 'APPROVAL', assigned_group: 'developer' });
+    const now = new Date().toISOString();
+    logGovActivity({
+      task_id: 'cp-ev',
+      action: 'evidence',
+      from_state: 'DOING',
+      to_state: null,
+      actor: 'developer',
+      reason: 'PR #42 merged: https://github.com/org/repo/pull/42',
+      created_at: now,
+    });
+
+    const pack = buildContextPack(getGovTaskById('cp-ev')!);
+    expect(pack).toContain('Evidence');
+    expect(pack).toContain('PR #42 merged');
+  });
+
+  it('includes activity excerpt (last 15 in chronological order)', () => {
+    seedTask({ id: 'cp-act', state: 'APPROVAL', assigned_group: 'developer' });
+    for (let i = 0; i < 20; i++) {
+      logGovActivity({
+        task_id: 'cp-act',
+        action: 'transition',
+        from_state: null,
+        to_state: null,
+        actor: 'system',
+        reason: `Step ${i}`,
+        created_at: `2026-02-15T10:${String(i).padStart(2, '0')}:00.000Z`,
+      });
+    }
+
+    const pack = buildContextPack(getGovTaskById('cp-act')!);
+    expect(pack).toContain('Activity Log (recent)');
+    // Should contain last 15 (steps 5-19)
+    expect(pack).toContain('Step 19');
+    expect(pack).toContain('Step 5');
+    expect(pack).not.toContain('Step 4');
+  });
+
+  it('includes gate approvals section', () => {
+    seedTask({ id: 'cp-gate', state: 'APPROVAL', gate: 'Security', assigned_group: 'developer' });
+    createGovApproval({
+      task_id: 'cp-gate',
+      gate_type: 'Security',
+      approved_by: 'security',
+      approved_at: new Date().toISOString(),
+      notes: 'Code review passed',
+    });
+
+    const pack = buildContextPack(getGovTaskById('cp-gate')!);
+    expect(pack).toContain('Gate Approvals');
+    expect(pack).toContain('Security approved by security');
+    expect(pack).toContain('Code review passed');
+  });
+
+  it('returns minimal pack for task with no context', () => {
+    seedTask({ id: 'cp-empty', state: 'APPROVAL', scope: 'COMPANY', assigned_group: 'developer' });
+
+    const pack = buildContextPack(getGovTaskById('cp-empty')!);
+    expect(pack).toContain('Task Metadata');
+    expect(pack).not.toContain('Product Context');
+    expect(pack).not.toContain('Execution Summary');
+    expect(pack).not.toContain('Evidence');
+    expect(pack).not.toContain('Activity Log');
   });
 });

@@ -305,13 +305,19 @@ async function handleExtCall(
     }
   }
 
-  // Broker coupling: validate task state + group when task_id is provided for write/production actions
+  // Broker coupling: validate task state + group + product scoping when task_id is provided
+  let taskProductId: string | null = null;
+  let taskScope: string | null = null;
+
   if (data.task_id && action.level >= 2) {
     const govTask = getGovTaskById(data.task_id);
     if (!govTask) {
       deny(requestId, sourceGroup, data, now, `Governance task '${data.task_id}' not found`);
       return;
     }
+
+    taskProductId = govTask.product_id || null;
+    taskScope = govTask.scope || null;
 
     // Task must be in an active execution state
     const ACTIVE_STATES = ['DOING', 'APPROVAL'];
@@ -330,6 +336,38 @@ async function handleExtCall(
         `Group '${sourceGroup}' is not assigned to task '${data.task_id}' (assigned: ${govTask.assigned_group})`,
       );
       return;
+    }
+
+    // Sprint 2: Product scoping enforcement
+    if (govTask.scope === 'PRODUCT') {
+      if (!govTask.product_id) {
+        deny(requestId, sourceGroup, data, now, 'PRODUCT_SCOPE_REQUIRES_PRODUCT_ID');
+        return;
+      }
+
+      // Capability product_id must match task product_id, or be NULL if caller is main
+      if (cap.product_id && cap.product_id !== govTask.product_id) {
+        deny(
+          requestId, sourceGroup, data, now,
+          `CAPABILITY_PRODUCT_MISMATCH: capability product_id '${cap.product_id}' != task product_id '${govTask.product_id}'`,
+        );
+        return;
+      }
+      if (!cap.product_id && sourceGroup !== 'main') {
+        deny(
+          requestId, sourceGroup, data, now,
+          `CAPABILITY_PRODUCT_MISMATCH: company-wide capability cannot be used for PRODUCT task by non-main group`,
+        );
+        return;
+      }
+    } else if (govTask.scope === 'COMPANY') {
+      // Company tasks should use company-wide capabilities (product_id=null)
+      if (cap.product_id) {
+        logger.debug(
+          { requestId, capProductId: cap.product_id, taskScope: 'COMPANY' },
+          'Product-scoped capability used for COMPANY task — allowed but logged',
+        );
+      }
     }
   }
 
@@ -399,6 +437,8 @@ async function handleExtCall(
     idempotency_key: data.idempotency_key || null,
     duration_ms: null,
     created_at: now,
+    product_id: taskProductId,
+    scope: taskScope,
   });
 
   if (!claimed) {
@@ -618,6 +658,8 @@ function ensureExtBrokerSentinelTask(): void {
     state: 'DONE',
     priority: 'P3',
     product: null,
+    product_id: null,
+    scope: 'COMPANY',
     assigned_group: 'main',
     executor: null,
     created_by: 'system',

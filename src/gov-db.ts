@@ -5,6 +5,7 @@ import type {
   GovApproval,
   GovDispatch,
   GovTask,
+  Product,
 } from './governance/constants.js';
 
 let db: Database.Database;
@@ -13,6 +14,16 @@ export function createGovSchema(database: Database.Database): void {
   db = database;
 
   database.exec(`
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      risk_level TEXT NOT NULL DEFAULT 'normal',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
+
     CREATE TABLE IF NOT EXISTS gov_tasks (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -21,6 +32,8 @@ export function createGovSchema(database: Database.Database): void {
       state TEXT NOT NULL DEFAULT 'INBOX',
       priority TEXT NOT NULL DEFAULT 'P2',
       product TEXT,
+      product_id TEXT,
+      scope TEXT NOT NULL DEFAULT 'PRODUCT',
       assigned_group TEXT,
       executor TEXT,
       created_by TEXT NOT NULL,
@@ -34,6 +47,8 @@ export function createGovSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_gov_tasks_state ON gov_tasks(state);
     CREATE INDEX IF NOT EXISTS idx_gov_tasks_assigned ON gov_tasks(assigned_group);
     CREATE INDEX IF NOT EXISTS idx_gov_tasks_product ON gov_tasks(product);
+    CREATE INDEX IF NOT EXISTS idx_gov_tasks_product_id ON gov_tasks(product_id);
+    CREATE INDEX IF NOT EXISTS idx_gov_tasks_scope ON gov_tasks(scope);
 
     CREATE TABLE IF NOT EXISTS gov_activities (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +88,80 @@ export function createGovSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_gov_dispatches_task ON gov_dispatches(task_id);
   `);
+
+  // Additive migrations for existing databases
+  runGovMigrations(database);
+}
+
+/**
+ * Additive-only column migrations for existing DBs.
+ * Each migration is guarded by try/catch — duplicate column errors are ignored.
+ */
+function runGovMigrations(database: Database.Database): void {
+  // Migration 001: Add product_id column to gov_tasks
+  try { database.exec(`ALTER TABLE gov_tasks ADD COLUMN product_id TEXT`); } catch { /* already exists */ }
+  // Migration 002: Add scope column to gov_tasks
+  try { database.exec(`ALTER TABLE gov_tasks ADD COLUMN scope TEXT NOT NULL DEFAULT 'PRODUCT'`); } catch { /* already exists */ }
+}
+
+// --- Products CRUD ---
+
+export function createProduct(product: Product): void {
+  db.prepare(
+    `INSERT INTO products (id, name, status, risk_level, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       status = excluded.status,
+       risk_level = excluded.risk_level,
+       updated_at = excluded.updated_at`,
+  ).run(
+    product.id,
+    product.name,
+    product.status,
+    product.risk_level,
+    product.created_at,
+    product.updated_at,
+  );
+}
+
+export function getProductById(id: string): Product | undefined {
+  return db.prepare('SELECT * FROM products WHERE id = ?').get(id) as
+    | Product
+    | undefined;
+}
+
+export function listProducts(status?: string): Product[] {
+  if (status) {
+    return db
+      .prepare('SELECT * FROM products WHERE status = ? ORDER BY name')
+      .all(status) as Product[];
+  }
+  return db
+    .prepare('SELECT * FROM products ORDER BY name')
+    .all() as Product[];
+}
+
+export function updateProduct(
+  id: string,
+  updates: Partial<Pick<Product, 'name' | 'status' | 'risk_level'>>,
+): boolean {
+  const fields: string[] = ['updated_at = ?'];
+  const values: unknown[] = [new Date().toISOString()];
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+
+  values.push(id);
+  const result = db
+    .prepare(`UPDATE products SET ${fields.join(', ')} WHERE id = ?`)
+    .run(...values);
+
+  return result.changes > 0;
 }
 
 // --- Gov Tasks CRUD ---
@@ -82,10 +171,10 @@ export function createGovTask(
 ): void {
   db.prepare(
     `INSERT INTO gov_tasks
-       (id, title, description, task_type, state, priority, product,
+       (id, title, description, task_type, state, priority, product, product_id, scope,
         assigned_group, executor, created_by, gate, dod_required, version,
         metadata, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        title = excluded.title,
        description = excluded.description,
@@ -93,6 +182,8 @@ export function createGovTask(
        state = excluded.state,
        priority = excluded.priority,
        product = excluded.product,
+       product_id = excluded.product_id,
+       scope = excluded.scope,
        assigned_group = excluded.assigned_group,
        executor = excluded.executor,
        gate = excluded.gate,
@@ -107,6 +198,8 @@ export function createGovTask(
     task.state,
     task.priority,
     task.product,
+    task.product_id,
+    task.scope,
     task.assigned_group,
     task.executor,
     task.created_by,
@@ -144,6 +237,35 @@ export function getAllGovTasks(): GovTask[] {
     .all() as GovTask[];
 }
 
+export function getGovTasksByProduct(productId: string): GovTask[] {
+  return db
+    .prepare(
+      'SELECT * FROM gov_tasks WHERE product_id = ? ORDER BY priority, created_at',
+    )
+    .all(productId) as GovTask[];
+}
+
+export function getGovTasksByScope(scope: string): GovTask[] {
+  return db
+    .prepare(
+      'SELECT * FROM gov_tasks WHERE scope = ? ORDER BY priority, created_at',
+    )
+    .all(scope) as GovTask[];
+}
+
+/**
+ * Count tasks in DOING state for a group — used for WIP limits.
+ */
+export function countDoingTasksByGroup(groupFolder: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM gov_tasks WHERE state = 'DOING' AND assigned_group = ?`,
+    )
+    .get(groupFolder) as { cnt: number };
+  return row.cnt;
+}
+
+
 /**
  * Optimistic-locking update: only succeeds if version matches.
  * Increments version on success.
@@ -160,6 +282,8 @@ export function updateGovTask(
       | 'state'
       | 'priority'
       | 'product'
+      | 'product_id'
+      | 'scope'
       | 'assigned_group'
       | 'executor'
       | 'gate'
@@ -237,6 +361,57 @@ export function getGovActivities(taskId: string): GovActivity[] {
       'SELECT * FROM gov_activities WHERE task_id = ? ORDER BY created_at',
     )
     .all(taskId) as GovActivity[];
+}
+
+/**
+ * Sprint 2: Context-useful activities for cross-agent review prompts.
+ * Filters to: transition, approve, evidence, execution_summary, coerce_scope.
+ */
+const CONTEXT_ACTIONS = ['transition', 'approve', 'evidence', 'execution_summary', 'coerce_scope'];
+
+export function getGovActivitiesForContext(
+  taskId: string,
+  limit = 50,
+): GovActivity[] {
+  const placeholders = CONTEXT_ACTIONS.map(() => '?').join(', ');
+  return db
+    .prepare(
+      `SELECT * FROM gov_activities
+       WHERE task_id = ? AND action IN (${placeholders})
+       ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(taskId, ...CONTEXT_ACTIONS, limit) as GovActivity[];
+}
+
+/**
+ * Sprint 2: Get execution summary for a task (v0 heuristic).
+ * 1. Preferred: latest activity with action='execution_summary' → its reason
+ * 2. Fallback: last DOING→REVIEW transition → its reason
+ * Returns null if neither exists.
+ */
+export function getGovTaskExecutionSummary(taskId: string): string | null {
+  // Preferred: execution_summary activity
+  const summaryActivity = db
+    .prepare(
+      `SELECT reason FROM gov_activities
+       WHERE task_id = ? AND action = 'execution_summary'
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(taskId) as { reason: string | null } | undefined;
+
+  if (summaryActivity?.reason) return summaryActivity.reason;
+
+  // Fallback: DOING→REVIEW transition reason
+  const transitionActivity = db
+    .prepare(
+      `SELECT reason FROM gov_activities
+       WHERE task_id = ? AND action = 'transition'
+         AND from_state = 'DOING' AND to_state = 'REVIEW'
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(taskId) as { reason: string | null } | undefined;
+
+  return transitionActivity?.reason || null;
 }
 
 // --- Gov Approvals (idempotent via UNIQUE) ---

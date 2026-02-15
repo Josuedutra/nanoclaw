@@ -31,11 +31,15 @@ import {
   getProviderActionCatalog,
 } from './ext-broker-providers.js';
 import {
+  countDoingTasksByGroup,
   getAllGovTasks,
   getDispatchableGovTasks,
   getGovActivities,
+  getGovActivitiesForContext,
   getGovApprovals,
   getGovTaskById,
+  getGovTaskExecutionSummary,
+  getProductById,
   getReviewableGovTasks,
   logGovActivity,
   tryCreateDispatch,
@@ -54,6 +58,16 @@ import { RegisteredGroup } from './types.js';
 
 export const GOV_POLL_INTERVAL = parseInt(
   process.env.GOV_POLL_INTERVAL || '10000',
+  10,
+);
+
+export const GOV_MAX_WIP_PER_GROUP = parseInt(
+  process.env.GOV_MAX_WIP_PER_GROUP || '2',
+  10,
+);
+
+export const GOV_MAX_WIP_TOTAL = parseInt(
+  process.env.GOV_MAX_WIP_TOTAL || '8',
   10,
 );
 
@@ -102,6 +116,37 @@ async function dispatchReadyTasks(deps: GovLoopDeps): Promise<void> {
 
   for (const task of readyTasks) {
     if (!task.assigned_group) continue;
+
+    // Skip dispatch for non-active products (paused/killed stay READY)
+    if (task.product_id) {
+      const product = getProductById(task.product_id);
+      if (product && product.status !== 'active') {
+        logGovActivity({
+          task_id: task.id,
+          action: 'dispatch_skipped',
+          from_state: 'READY',
+          to_state: null,
+          actor: 'system',
+          reason: `DISPATCH_SKIPPED_PRODUCT_NOT_ACTIVE (status=${product.status})`,
+          created_at: new Date().toISOString(),
+        });
+        logger.debug(
+          { taskId: task.id, productId: task.product_id, productStatus: product.status },
+          'Gov dispatch: product not active, skipping',
+        );
+        continue;
+      }
+    }
+
+    // WIP limit: per-group
+    const doingCount = countDoingTasksByGroup(task.assigned_group);
+    if (doingCount >= GOV_MAX_WIP_PER_GROUP) {
+      logger.debug(
+        { taskId: task.id, group: task.assigned_group, doingCount, limit: GOV_MAX_WIP_PER_GROUP },
+        'Gov dispatch: WIP limit reached for group, skipping',
+      );
+      continue;
+    }
 
     const groupJid = resolveGroupJid(task.assigned_group, deps);
     if (!groupJid) {
@@ -329,9 +374,18 @@ function buildGovTaskPrompt(task: GovTask): string {
     `- ID: ${task.id}`,
     `- Title: ${task.title}`,
     `- Type: ${task.task_type} | Priority: ${task.priority}`,
+    `- Scope: ${task.scope}`,
   ];
   if (task.description) lines.push(`- Description: ${task.description}`);
   if (task.product) lines.push(`- Product: ${task.product}`);
+
+  // Sprint 2: Product context for PRODUCT scope
+  if (task.scope === 'PRODUCT' && task.product_id) {
+    const product = getProductById(task.product_id);
+    if (product) {
+      lines.push(`- Product Name: ${product.name} (${product.status}, risk: ${product.risk_level})`);
+    }
+  }
 
   // Cross-agent context
   const context = buildTaskContext(task.id);
@@ -342,36 +396,106 @@ function buildGovTaskPrompt(task: GovTask): string {
   }
 
   lines.push('');
-  lines.push('When you finish, use the gov_transition tool to move this task to REVIEW.');
+  lines.push('When you finish, use the gov_transition tool to move this task to REVIEW with a summary of what you did.');
   lines.push('If you are blocked, move it to BLOCKED with a reason.');
 
   return lines.join('\n');
 }
 
+/**
+ * Sprint 2: Build structured Context Pack for approval prompts.
+ * Gives the reviewer enough context to decide without chat history.
+ */
+export function buildContextPack(task: GovTask): string {
+  const sections: string[] = [];
+
+  // 1. Product context (if PRODUCT scope)
+  if (task.scope === 'PRODUCT' && task.product_id) {
+    const product = getProductById(task.product_id);
+    if (product) {
+      sections.push('## Product Context');
+      sections.push(`- Name: ${product.name}`);
+      sections.push(`- Status: ${product.status}`);
+      sections.push(`- Risk Level: ${product.risk_level}`);
+      sections.push('');
+    }
+  }
+
+  // 2. Task metadata
+  sections.push('## Task Metadata');
+  sections.push(`- ID: ${task.id}`);
+  sections.push(`- Title: ${task.title}`);
+  sections.push(`- Type: ${task.task_type} | Priority: ${task.priority}`);
+  sections.push(`- Scope: ${task.scope}`);
+  if (task.description) sections.push(`- Description: ${task.description}`);
+  if (task.executor) sections.push(`- Executor: ${task.executor}`);
+  if (task.assigned_group) sections.push(`- Developer group: ${task.assigned_group}`);
+  sections.push('');
+
+  // 3. Execution summary
+  const summary = getGovTaskExecutionSummary(task.id);
+  if (summary) {
+    sections.push('## Execution Summary');
+    sections.push(summary);
+    sections.push('');
+  }
+
+  // 4. Evidence links
+  const allActivities = getGovActivitiesForContext(task.id, 50);
+  const evidenceActivities = allActivities.filter(a => a.action === 'evidence');
+  if (evidenceActivities.length > 0) {
+    sections.push('## Evidence');
+    for (const e of evidenceActivities) {
+      sections.push(`- ${e.reason || '(no description)'} [${e.actor}, ${e.created_at}]`);
+    }
+    sections.push('');
+  }
+
+  // 5. Activity excerpt (last 15)
+  const recentActivities = getGovActivitiesForContext(task.id, 15);
+  if (recentActivities.length > 0) {
+    // Reverse to chronological order (DESC → ASC)
+    const chronological = [...recentActivities].reverse();
+    sections.push('## Activity Log (recent)');
+    for (const a of chronological) {
+      const transition = a.from_state && a.to_state ? `${a.from_state} → ${a.to_state}` : a.action;
+      sections.push(`- [${a.created_at}] ${a.actor}: ${transition}${a.reason ? ` — ${a.reason}` : ''}`);
+    }
+    sections.push('');
+  }
+
+  // Gate approvals
+  const approvals = getGovApprovals(task.id);
+  if (approvals.length > 0) {
+    sections.push('## Gate Approvals');
+    for (const ap of approvals) {
+      sections.push(`- ${ap.gate_type} approved by ${ap.approved_by} at ${ap.approved_at}${ap.notes ? ` — ${ap.notes}` : ''}`);
+    }
+    sections.push('');
+  }
+
+  return sections.join('\n');
+}
+
 function buildApprovalPrompt(task: GovTask, gate: string): string {
   const lines = [
     `A governance task requires your ${gate} gate approval:`,
-    `- ID: ${task.id}`,
-    `- Title: ${task.title}`,
-    `- Type: ${task.task_type} | Priority: ${task.priority}`,
-    `- Current State: APPROVAL`,
+    '',
   ];
-  if (task.description) lines.push(`- Description: ${task.description}`);
-  if (task.executor) lines.push(`- Executor: ${task.executor}`);
-  if (task.assigned_group) lines.push(`- Developer group: ${task.assigned_group}`);
 
-  // Cross-agent context — critical for approval decisions
-  const context = buildTaskContext(task.id);
-  if (context) {
-    lines.push('');
-    lines.push('--- Execution context from prior agents ---');
-    lines.push(context);
+  // Sprint 2: Inject Context Pack
+  const contextPack = buildContextPack(task);
+  if (contextPack) {
+    lines.push('--- Context Pack ---');
+    lines.push(contextPack);
   }
 
-  lines.push('');
-  lines.push(`Use gov_approve to approve the ${gate} gate.`);
-  lines.push('Then use gov_transition to move the task to DONE.');
-  lines.push('If there are concerns, use gov_transition to move back to REVIEW or BLOCKED.');
+  // Reviewer contract
+  lines.push('--- Reviewer Contract ---');
+  lines.push(`You must take ONE of the following actions:`);
+  lines.push(`1. APPROVE: Use gov_approve for the ${gate} gate, then gov_transition to DONE`);
+  lines.push(`2. BLOCK: Use gov_transition to BLOCKED with an explicit reason`);
+  lines.push(`3. REWORK: Use gov_transition back to DOING with an explicit reason for the developer`);
 
   return lines.join('\n');
 }
@@ -530,6 +654,8 @@ export function writeGovSnapshot(
       state: t.state,
       priority: t.priority,
       product: t.product,
+      product_id: t.product_id,
+      scope: t.scope,
       assigned_group: t.assigned_group,
       executor: t.executor,
       gate: t.gate,

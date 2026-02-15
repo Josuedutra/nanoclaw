@@ -2,10 +2,11 @@ import {
   createGovApproval,
   createGovTask,
   getGovTaskById,
+  getProductById,
   logGovActivity,
   updateGovTask,
 } from './gov-db.js';
-import { GateTypes, TaskStates } from './governance/constants.js';
+import { GateTypes, GovScopes, TaskStates } from './governance/constants.js';
 import type { GateType as GateTypeEnum } from './governance/gates.js';
 import { checkApprover, checkApproverNotExecutor } from './governance/gates.js';
 import { validateTransition } from './governance/policy.js';
@@ -20,6 +21,8 @@ export interface GovIpcData {
   task_type?: string;
   priority?: string;
   product?: string;
+  product_id?: string;
+  scope?: string; // 'COMPANY' | 'PRODUCT'
   assigned_group?: string;
   gate?: string;
   // gov_transition
@@ -61,6 +64,40 @@ export async function processGovIpc(
         logger.warn({ gate: data.gate }, 'gov_create invalid gate');
         break;
       }
+      // --- Derive effective scope ---
+      // 1. Explicit scope provided → validate it
+      // 2. No scope + product_id → PRODUCT
+      // 3. No scope + no product_id → COMPANY
+      let effectiveScope = data.scope || (data.product_id ? 'PRODUCT' : 'COMPANY');
+      if (data.scope && !GovScopes.includes(data.scope as typeof GovScopes[number])) {
+        logger.warn({ scope: data.scope }, 'gov_create invalid scope');
+        break;
+      }
+      // COMPANY scope cannot have product_id → DENY
+      if (effectiveScope === 'COMPANY' && data.product_id) {
+        logger.warn({ scope: effectiveScope, product_id: data.product_id }, 'gov_create COMPANY scope cannot have product_id');
+        break;
+      }
+      // PRODUCT scope without product_id → coerce to COMPANY + audit
+      let scopeCoerced = false;
+      if (effectiveScope === 'PRODUCT' && !data.product_id) {
+        effectiveScope = 'COMPANY';
+        scopeCoerced = true;
+        logger.info({ originalScope: 'PRODUCT' }, 'gov_create coerced PRODUCT scope to COMPANY (no product_id)');
+      }
+      // Validate product_id FK if provided
+      if (data.product_id) {
+        const product = getProductById(data.product_id);
+        if (!product) {
+          logger.warn({ product_id: data.product_id }, 'gov_create product_id not found');
+          break;
+        }
+        // Killed product → DENY new PRODUCT tasks
+        if (product.status === 'killed') {
+          logger.warn({ product_id: data.product_id, status: product.status }, 'gov_create denied — product is killed');
+          break;
+        }
+      }
 
       const taskId = data.id || `gov-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       createGovTask({
@@ -71,6 +108,8 @@ export async function processGovIpc(
         state: 'INBOX',
         priority: data.priority || 'P2',
         product: data.product || null,
+        product_id: data.product_id || null,
+        scope: effectiveScope as 'COMPANY' | 'PRODUCT',
         assigned_group: data.assigned_group || null,
         executor: null,
         created_by: sourceGroup,
@@ -89,7 +128,18 @@ export async function processGovIpc(
         reason: null,
         created_at: now,
       });
-      logger.info({ taskId, sourceGroup, title: data.title }, 'Governance task created');
+      if (scopeCoerced) {
+        logGovActivity({
+          task_id: taskId,
+          action: 'coerce_scope',
+          from_state: null,
+          to_state: null,
+          actor: 'system',
+          reason: 'PRODUCT_SCOPE_WITHOUT_PRODUCT_ID',
+          created_at: now,
+        });
+      }
+      logger.info({ taskId, sourceGroup, title: data.title, scope: effectiveScope }, 'Governance task created');
       break;
     }
 
@@ -150,6 +200,17 @@ export async function processGovIpc(
         break;
       }
 
+      // Sprint 2: Strict mode requires review summary for DOING→REVIEW
+      if (strict && task.state === 'DOING' && data.toState === 'REVIEW') {
+        if (!data.reason || data.reason.trim().length === 0) {
+          logger.warn(
+            { taskId: data.taskId },
+            'gov_transition DOING→REVIEW denied: MISSING_REVIEW_SUMMARY (strict mode)',
+          );
+          break;
+        }
+      }
+
       // Optimistic locking update
       const updated = updateGovTask(data.taskId, task.version, {
         state: data.toState as typeof task.state,
@@ -157,6 +218,19 @@ export async function processGovIpc(
       if (!updated) {
         logger.warn({ taskId: data.taskId }, 'gov_transition version conflict (concurrent update)');
         break;
+      }
+
+      // Sprint 2: Log execution_summary activity for DOING→REVIEW
+      if (task.state === 'DOING' && data.toState === 'REVIEW' && data.reason) {
+        logGovActivity({
+          task_id: data.taskId,
+          action: 'execution_summary',
+          from_state: 'DOING',
+          to_state: 'REVIEW',
+          actor: sourceGroup,
+          reason: data.reason,
+          created_at: now,
+        });
       }
 
       logGovActivity({

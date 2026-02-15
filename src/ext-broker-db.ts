@@ -20,6 +20,8 @@ export interface ExtCapability {
   granted_at: string;
   expires_at: string | null;
   active: number; // 0 or 1
+  scope?: string | null;
+  product_id?: string | null;
 }
 
 export interface ExtCall {
@@ -39,6 +41,8 @@ export interface ExtCall {
   idempotency_key: string | null;
   duration_ms: number | null;
   created_at: string;
+  product_id?: string | null;
+  scope?: string | null;
 }
 
 let db: Database.Database;
@@ -87,6 +91,24 @@ export function createExtAccessSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_ext_calls_request ON ext_calls(request_id);
     CREATE INDEX IF NOT EXISTS idx_ext_calls_idempotency ON ext_calls(idempotency_key);
   `);
+
+  // Additive migrations for existing databases
+  runExtMigrations(database);
+}
+
+/**
+ * Additive-only column migrations for ext tables.
+ * Each migration is guarded by try/catch — duplicate column errors are ignored.
+ */
+function runExtMigrations(database: Database.Database): void {
+  // Migration 001: Add scope column to ext_capabilities
+  try { database.exec(`ALTER TABLE ext_capabilities ADD COLUMN scope TEXT`); } catch { /* already exists */ }
+  // Migration 002: Add product_id column to ext_capabilities
+  try { database.exec(`ALTER TABLE ext_capabilities ADD COLUMN product_id TEXT`); } catch { /* already exists */ }
+  // Migration 003: Add product_id column to ext_calls
+  try { database.exec(`ALTER TABLE ext_calls ADD COLUMN product_id TEXT`); } catch { /* already exists */ }
+  // Migration 004: Add scope column to ext_calls
+  try { database.exec(`ALTER TABLE ext_calls ADD COLUMN scope TEXT`); } catch { /* already exists */ }
 }
 
 // --- Capabilities CRUD ---
@@ -124,8 +146,8 @@ export function grantCapability(cap: Omit<ExtCapability, 'id'>): void {
   db.prepare(
     `INSERT INTO ext_capabilities
        (group_folder, provider, access_level, allowed_actions, denied_actions,
-        requires_task_gate, granted_by, granted_at, expires_at, active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        requires_task_gate, granted_by, granted_at, expires_at, active, product_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
      ON CONFLICT(group_folder, provider) DO UPDATE SET
        access_level = excluded.access_level,
        allowed_actions = excluded.allowed_actions,
@@ -134,6 +156,7 @@ export function grantCapability(cap: Omit<ExtCapability, 'id'>): void {
        granted_by = excluded.granted_by,
        granted_at = excluded.granted_at,
        expires_at = excluded.expires_at,
+       product_id = excluded.product_id,
        active = 1`,
   ).run(
     cap.group_folder,
@@ -145,6 +168,7 @@ export function grantCapability(cap: Omit<ExtCapability, 'id'>): void {
     cap.granted_by,
     cap.granted_at,
     cap.expires_at,
+    cap.product_id ?? null,
   );
 }
 
@@ -166,8 +190,9 @@ export function logExtCall(call: ExtCall): boolean {
       `INSERT INTO ext_calls
          (request_id, group_folder, provider, action, access_level,
           params_hmac, params_summary, status, denial_reason, result_summary,
-          response_data, task_id, idempotency_key, duration_ms, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          response_data, task_id, idempotency_key, duration_ms, created_at,
+          product_id, scope)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       call.request_id,
       call.group_folder,
@@ -184,6 +209,8 @@ export function logExtCall(call: ExtCall): boolean {
       call.idempotency_key,
       call.duration_ms,
       call.created_at,
+      call.product_id ?? null,
+      call.scope ?? null,
     );
     return true;
   } catch (err: unknown) {
