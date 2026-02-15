@@ -32,9 +32,11 @@ import {
   getProvider,
   type ProviderSecrets,
 } from './ext-broker-providers.js';
-import { getGovApprovals } from './gov-db.js';
-import { logGovActivity } from './gov-db.js';
+import { createGovTask, getGovApprovals, getGovTaskById, logGovActivity } from './gov-db.js';
 import { logger } from './logger.js';
+
+/** Sentinel task_id for ext_broker audit entries in gov_activities */
+const EXT_BROKER_TASK_ID = '__ext_broker__';
 
 // --- Config ---
 
@@ -303,6 +305,34 @@ async function handleExtCall(
     }
   }
 
+  // Broker coupling: validate task state + group when task_id is provided for write/production actions
+  if (data.task_id && action.level >= 2) {
+    const govTask = getGovTaskById(data.task_id);
+    if (!govTask) {
+      deny(requestId, sourceGroup, data, now, `Governance task '${data.task_id}' not found`);
+      return;
+    }
+
+    // Task must be in an active execution state
+    const ACTIVE_STATES = ['DOING', 'APPROVAL'];
+    if (!ACTIVE_STATES.includes(govTask.state)) {
+      deny(
+        requestId, sourceGroup, data, now,
+        `Task '${data.task_id}' is in state ${govTask.state} — ext_call requires DOING or APPROVAL`,
+      );
+      return;
+    }
+
+    // Requesting group must be the assigned group (or main)
+    if (govTask.assigned_group && govTask.assigned_group !== sourceGroup && sourceGroup !== 'main') {
+      deny(
+        requestId, sourceGroup, data, now,
+        `Group '${sourceGroup}' is not assigned to task '${data.task_id}' (assigned: ${govTask.assigned_group})`,
+      );
+      return;
+    }
+  }
+
   // P0-2: L3 two-man rule — requires gate approval + main approval on the governance task
   if (action.level === 3) {
     if (!data.task_id) {
@@ -480,7 +510,7 @@ function handleExtGrant(
 
   // P0-5: Audit in gov_activities
   logGovActivity({
-    task_id: '__ext_broker__',
+    task_id: EXT_BROKER_TASK_ID,
     action: 'ext_grant',
     from_state: null,
     to_state: null,
@@ -516,7 +546,7 @@ function handleExtRevoke(
 
   // P0-5: Audit
   logGovActivity({
-    task_id: '__ext_broker__',
+    task_id: EXT_BROKER_TASK_ID,
     action: 'ext_revoke',
     from_state: null,
     to_state: null,
@@ -573,9 +603,38 @@ function deny(
   );
 }
 
+// --- Sentinel task ---
+
+function ensureExtBrokerSentinelTask(): void {
+  const existing = getGovTaskById(EXT_BROKER_TASK_ID);
+  if (existing) return;
+
+  const now = new Date().toISOString();
+  createGovTask({
+    id: EXT_BROKER_TASK_ID,
+    title: 'External Access Broker audit log',
+    description: 'Sentinel task for ext_broker grant/revoke audit entries',
+    task_type: 'OPS',
+    state: 'DONE',
+    priority: 'P3',
+    product: null,
+    assigned_group: 'main',
+    executor: null,
+    created_by: 'system',
+    gate: 'None',
+    dod_required: 0,
+    metadata: null,
+    created_at: now,
+    updated_at: now,
+  });
+}
+
 // --- Provider registration (called at startup) ---
 
 export function initExtBroker(): void {
+  // Ensure sentinel task exists for audit FK
+  ensureExtBrokerSentinelTask();
+
   // Register v0 providers
   // Dynamic import to avoid circular deps
   import('./ext-providers/github.js').then(({ githubProvider }) => {
