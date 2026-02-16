@@ -3,6 +3,9 @@ import { opsFetch } from '@/lib/ops-fetch';
 import { Badge } from '@/components/Badge';
 import { ErrorCallout } from '@/components/ErrorCallout';
 import { TaskActions } from '@/components/TaskActions';
+import { DodEditor } from '@/components/DodEditor';
+import { EvidencePanel } from '@/components/EvidencePanel';
+import { CommentsPanel } from '@/components/CommentsPanel';
 
 interface Task {
   id: string;
@@ -66,6 +69,38 @@ export default async function TaskDetailPage({
     activities = [];
   }
 
+  // Parse metadata for DoD checklist, evidence, docsUpdated
+  let dodItems: { id?: string; text: string; done: boolean }[] = [];
+  let evidence: { link: string; note: string; addedAt: string }[] = [];
+  let docsUpdated = false;
+  if (task.metadata) {
+    try {
+      const meta = JSON.parse(task.metadata);
+      // Prefer dodStatus (has done flags) over dodChecklist (text-only)
+      if (Array.isArray(meta.dodStatus)) {
+        dodItems = meta.dodStatus.filter(
+          (i: unknown): i is { id?: string; text: string; done: boolean } =>
+            !!i && typeof i === 'object' && 'text' in i && 'done' in i,
+        );
+      } else if (Array.isArray(meta.dodChecklist)) {
+        dodItems = meta.dodChecklist
+          .filter((item: unknown): item is string => typeof item === 'string')
+          .map((text: string) => ({ text, done: false }));
+      }
+      if (Array.isArray(meta.evidence)) {
+        evidence = meta.evidence.filter(
+          (e: unknown): e is { link: string; note: string; addedAt: string } =>
+            !!e && typeof e === 'object' && 'link' in e,
+        );
+      }
+      if (typeof meta.docsUpdated === 'boolean') {
+        docsUpdated = meta.docsUpdated;
+      }
+    } catch {
+      // malformed metadata — ignore
+    }
+  }
+
   const fields = [
     ['Type', task.task_type],
     ['State', task.state],
@@ -111,6 +146,17 @@ export default async function TaskDetailPage({
         ))}
       </div>
 
+      {/* DoD Checklist (editable) */}
+      <DodEditor taskId={task.id} initialItems={dodItems} />
+
+      {/* Evidence & Docs */}
+      <EvidencePanel
+        taskId={task.id}
+        initialEvidence={evidence}
+        docsUpdated={docsUpdated}
+        taskType={task.task_type}
+      />
+
       {/* Task Actions */}
       <TaskActions
         taskId={task.id}
@@ -118,6 +164,9 @@ export default async function TaskDetailPage({
         gate={task.gate}
         version={task.version}
       />
+
+      {/* Comments */}
+      <CommentsPanel taskId={task.id} activities={activities} />
 
       {/* Activities */}
       <section>

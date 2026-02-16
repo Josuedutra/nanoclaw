@@ -19,7 +19,9 @@ export type OpsEventType =
   | 'tunnel:status'
   | 'dispatch:lifecycle'
   | 'limits:denial'
-  | 'breaker:state';
+  | 'breaker:state'
+  | 'chat:message'
+  | 'notification:created';
 
 export interface OpsEvent {
   type: OpsEventType;

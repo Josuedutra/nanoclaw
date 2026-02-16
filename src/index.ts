@@ -38,6 +38,7 @@ import { formatMessages, formatOutbound } from './router.js';
 import { initExtBroker } from './ext-broker.js';
 import { startGovLoop } from './gov-loop.js';
 import { startAlertHooks } from './ops-alerts.js';
+import { emitOpsEvent } from './ops-events.js';
 import { startOpsHttp } from './ops-http.js';
 import { runPreflight } from './preflight.js';
 import { startSchedulerLoop } from './task-scheduler.js';
@@ -179,6 +180,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await whatsapp.sendMessage(chatJid, text);
+        emitOpsEvent('chat:message', {
+          chatJid,
+          text,
+          sender: ASSISTANT_NAME,
+          timestamp: new Date().toISOString(),
+        });
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)

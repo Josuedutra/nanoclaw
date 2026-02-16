@@ -103,3 +103,13 @@ export interface GovDispatch {
   created_at: string;
   updated_at: string;
 }
+
+export interface GovNotification {
+  id: number;
+  task_id: string;
+  target_group: string;
+  actor: string;
+  snippet: string;
+  read: number; // 0 or 1
+  created_at: string;
+}

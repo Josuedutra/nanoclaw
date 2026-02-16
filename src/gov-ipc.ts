@@ -27,6 +27,7 @@ export interface GovIpcData {
   scope?: string; // 'COMPANY' | 'PRODUCT'
   assigned_group?: string;
   gate?: string;
+  metadata?: Record<string, unknown>; // extensible metadata merged with policy_version
   // gov_transition
   taskId?: string;
   toState?: string;
@@ -102,7 +103,7 @@ export async function processGovIpc(
       }
 
       const taskId = data.id || `gov-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const metadata = JSON.stringify({ policy_version: POLICY_VERSION });
+      const metadata = JSON.stringify({ policy_version: POLICY_VERSION, ...(data.metadata || {}) });
       createGovTask({
         id: taskId,
         title: data.title,

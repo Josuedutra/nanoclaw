@@ -4,6 +4,7 @@ import type {
   GovActivity,
   GovApproval,
   GovDispatch,
+  GovNotification,
   GovTask,
   Product,
 } from './governance/constants.js';
@@ -87,6 +88,18 @@ export function createGovSchema(database: Database.Database): void {
       UNIQUE(dispatch_key)
     );
     CREATE INDEX IF NOT EXISTS idx_gov_dispatches_task ON gov_dispatches(task_id);
+
+    CREATE TABLE IF NOT EXISTS gov_notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      target_group TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      snippet TEXT NOT NULL,
+      read INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (task_id) REFERENCES gov_tasks(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_gov_notif_target ON gov_notifications(target_group, read, created_at);
   `);
 
   // Additive migrations for existing databases
@@ -496,4 +509,60 @@ export function getDispatchesByWorkerId(
       'SELECT * FROM gov_dispatches WHERE worker_id = ? ORDER BY created_at DESC LIMIT ?',
     )
     .all(workerId, limit) as GovDispatch[];
+}
+
+// --- Gov Notifications ---
+
+export function createNotification(n: Omit<GovNotification, 'id' | 'read'>): void {
+  db.prepare(
+    `INSERT INTO gov_notifications (task_id, target_group, actor, snippet, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(n.task_id, n.target_group, n.actor, n.snippet, n.created_at);
+}
+
+export function getNotifications(opts: {
+  target_group?: string;
+  unread_only?: boolean;
+  limit?: number;
+}): GovNotification[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (opts.target_group) {
+    conditions.push('target_group = ?');
+    values.push(opts.target_group);
+  }
+  if (opts.unread_only) {
+    conditions.push('read = 0');
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limit = Math.min(opts.limit ?? 50, 200);
+  values.push(limit);
+
+  return db
+    .prepare(`SELECT * FROM gov_notifications ${where} ORDER BY created_at DESC LIMIT ?`)
+    .all(...values) as GovNotification[];
+}
+
+export function getUnreadNotificationCount(targetGroup?: string): number {
+  if (targetGroup) {
+    const row = db
+      .prepare('SELECT COUNT(*) as cnt FROM gov_notifications WHERE read = 0 AND target_group = ?')
+      .get(targetGroup) as { cnt: number };
+    return row.cnt;
+  }
+  const row = db
+    .prepare('SELECT COUNT(*) as cnt FROM gov_notifications WHERE read = 0')
+    .get() as { cnt: number };
+  return row.cnt;
+}
+
+export function markNotificationsRead(ids: number[]): number {
+  if (ids.length === 0) return 0;
+  const placeholders = ids.map(() => '?').join(', ');
+  const result = db
+    .prepare(`UPDATE gov_notifications SET read = 1 WHERE id IN (${placeholders}) AND read = 0`)
+    .run(...ids);
+  return result.changes;
 }

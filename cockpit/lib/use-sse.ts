@@ -43,7 +43,8 @@ export function useSse(onEvent: (event: SseEvent) => void) {
     // Listen to all event types
     for (const type of [
       'worker:status', 'tunnel:status', 'dispatch:lifecycle',
-      'limits:denial', 'breaker:state', 'connected',
+      'limits:denial', 'breaker:state', 'connected', 'chat:message',
+      'notification:created',
     ]) {
       es.addEventListener(type, handler);
     }

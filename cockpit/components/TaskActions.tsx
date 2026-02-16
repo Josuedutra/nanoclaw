@@ -43,6 +43,10 @@ export function TaskActions({ taskId, state, gate, version }: TaskActionsProps) 
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // Review summary (DOING -> REVIEW)
+  const [showReviewSummary, setShowReviewSummary] = useState(false);
+  const [reviewSummary, setReviewSummary] = useState('');
+
   // Override form state
   const [showOverride, setShowOverride] = useState(false);
   const [reason, setReason] = useState('');
@@ -58,17 +62,31 @@ export function TaskActions({ taskId, state, gate, version }: TaskActionsProps) 
   if (isTerminal && !canApprove && !canOverride) return null;
 
   async function handleTransition(toState: string) {
+    // Intercept DOING -> REVIEW: require review summary
+    if (state === 'DOING' && toState === 'REVIEW') {
+      setShowReviewSummary(true);
+      return;
+    }
+    await doTransition(toState);
+  }
+
+  async function doTransition(toState: string, summary?: string) {
     setError('');
     setSuccess('');
     setLoading(true);
     try {
-      const result = await writeAction('/api/write/tasks/transition', {
+      const body: Record<string, unknown> = {
         taskId,
         toState,
         expectedVersion: version,
-      });
+      };
+      if (summary) body.reason = summary;
+
+      const result = await writeAction('/api/write/tasks/transition', body);
       if (result.ok) {
         setSuccess(`Transitioned to ${toState}`);
+        setShowReviewSummary(false);
+        setReviewSummary('');
         router.refresh();
       } else {
         setError(result.error || 'Transition failed');
@@ -78,6 +96,14 @@ export function TaskActions({ taskId, state, gate, version }: TaskActionsProps) 
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleSubmitReview() {
+    if (!reviewSummary.trim()) {
+      setError('Review summary is required for DOING -> REVIEW');
+      return;
+    }
+    await doTransition('REVIEW', reviewSummary.trim());
   }
 
   async function handleApprove() {
@@ -139,8 +165,46 @@ export function TaskActions({ taskId, state, gate, version }: TaskActionsProps) 
         </div>
       )}
 
+      {/* Review summary modal (DOING -> REVIEW) */}
+      {showReviewSummary && (
+        <div className="space-y-2 rounded border border-purple-800 bg-purple-900/10 p-4">
+          <div className="text-sm font-medium text-purple-300">
+            Review Summary Required
+          </div>
+          <p className="text-xs text-zinc-400">
+            Describe what was done and what should be reviewed.
+          </p>
+          <textarea
+            value={reviewSummary}
+            onChange={(e) => setReviewSummary(e.target.value)}
+            placeholder="What was implemented, tested, or changed?"
+            rows={3}
+            maxLength={4000}
+            className="w-full rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm placeholder-zinc-500"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={handleSubmitReview}
+              disabled={loading || !reviewSummary.trim()}
+              className="rounded bg-purple-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-purple-600 disabled:opacity-50"
+            >
+              {loading ? 'Submitting...' : 'Submit for Review'}
+            </button>
+            <button
+              onClick={() => {
+                setShowReviewSummary(false);
+                setReviewSummary('');
+              }}
+              className="rounded border border-zinc-700 px-3 py-1.5 text-xs hover:bg-zinc-800"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Transition buttons */}
-      {nextStates.length > 0 && (
+      {nextStates.length > 0 && !showReviewSummary && (
         <div className="flex flex-wrap gap-2">
           {nextStates.map((s) => (
             <button

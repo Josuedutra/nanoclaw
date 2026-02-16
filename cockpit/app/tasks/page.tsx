@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { opsFetch } from '@/lib/ops-fetch';
 import { Badge } from '@/components/Badge';
 import { ErrorCallout } from '@/components/ErrorCallout';
+import { NewTaskSection } from './NewTaskSection';
 
 interface Task {
   id: string;
@@ -13,6 +14,12 @@ interface Task {
   product_id: string | null;
   assigned_group: string | null;
   updated_at: string;
+}
+
+interface Product {
+  id: string;
+  name: string;
+  status: string;
 }
 
 export default async function TasksPage({
@@ -27,8 +34,12 @@ export default async function TasksPage({
   if (sp.product_id) params.product_id = sp.product_id;
 
   let tasks: Task[];
+  let products: Product[] = [];
   try {
-    tasks = await opsFetch<Task[]>('/ops/tasks', params);
+    [tasks, products] = await Promise.all([
+      opsFetch<Task[]>('/ops/tasks', params),
+      opsFetch<Product[]>('/ops/products').catch(() => [] as Product[]),
+    ]);
   } catch (err) {
     return (
       <ErrorCallout
@@ -62,7 +73,10 @@ export default async function TasksPage({
 
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-bold">Tasks</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold">Tasks</h2>
+        <NewTaskSection products={products} />
+      </div>
 
       {/* Filters */}
       <form className="flex gap-3">

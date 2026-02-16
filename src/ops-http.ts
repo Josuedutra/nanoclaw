@@ -6,6 +6,7 @@
 import http from 'http';
 
 import { OPS_HTTP_HOST, OPS_HTTP_PORT } from './config.js';
+import { getDb } from './db.js';
 import {
   getAllGovTasks,
   getGovActivities,
@@ -14,7 +15,9 @@ import {
   getGovTaskById,
   getGovTaskExecutionSummary,
   getGovTasksByState,
+  getNotifications,
   getProductById,
+  getUnreadNotificationCount,
   listProducts,
 } from './gov-db.js';
 import { routeWriteAction } from './ops-actions.js';
@@ -360,6 +363,78 @@ function handleWorkerTunnels(
   });
 }
 
+function handleMessages(
+  params: URLSearchParams,
+  res: http.ServerResponse,
+): void {
+  const db = getDb();
+
+  // Find main group JID
+  const mainRow = db.prepare(
+    "SELECT jid FROM registered_groups WHERE folder = 'main' LIMIT 1",
+  ).get() as { jid: string } | undefined;
+
+  if (!mainRow) {
+    json(res, 200, { messages: [], group_jid: null });
+    return;
+  }
+
+  const groupJid = mainRow.jid;
+  const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 200);
+  const before = params.get('before') || '';
+
+  let sql: string;
+  let args: unknown[];
+  if (before) {
+    sql = `SELECT id, sender_name, content, timestamp, is_bot_message
+           FROM messages WHERE chat_jid = ? AND timestamp < ?
+           ORDER BY timestamp DESC LIMIT ?`;
+    args = [groupJid, before, limit];
+  } else {
+    sql = `SELECT id, sender_name, content, timestamp, is_bot_message
+           FROM messages WHERE chat_jid = ?
+           ORDER BY timestamp DESC LIMIT ?`;
+    args = [groupJid, limit];
+  }
+
+  const rows = db.prepare(sql).all(...args) as Array<{
+    id: string;
+    sender_name: string;
+    content: string;
+    timestamp: string;
+    is_bot_message: number;
+  }>;
+
+  // Reverse to chronological order (oldest first)
+  rows.reverse();
+
+  json(res, 200, {
+    messages: rows.map((r) => ({
+      id: r.id,
+      sender_name: r.sender_name,
+      content: r.content,
+      timestamp: r.timestamp,
+      is_bot_message: r.is_bot_message === 1,
+    })),
+    group_jid: groupJid,
+  });
+}
+
+function handleNotifications(
+  params: URLSearchParams,
+  res: http.ServerResponse,
+): void {
+  const targetGroup = params.get('target_group') || undefined;
+  const unreadOnly = params.get('unread_only') === '1' || params.get('unread_only') === 'true';
+  const limitParam = parseInt(params.get('limit') || '50', 10);
+  const limit = Math.min(Math.max(limitParam, 0), 200);
+
+  const notifications = getNotifications({ target_group: targetGroup, unread_only: unreadOnly, limit });
+  const unreadCount = getUnreadNotificationCount(targetGroup);
+
+  json(res, 200, { notifications, unreadCount });
+}
+
 // Route matching: /ops/tasks/:id/activities, /ops/tasks/:id/approvals, /ops/tasks/:id, /ops/products/:id, /ops/workers/:id/*
 const TASK_BY_ID = /^\/ops\/tasks\/([^/]+)$/;
 const TASK_ACTIVITIES = /^\/ops\/tasks\/([^/]+)\/activities$/;
@@ -422,11 +497,15 @@ function route(
       return handleApprovals(req, res);
     case '/ops/workers':
       return handleWorkers(req, res);
+    case '/ops/messages':
+      return handleMessages(params, res);
     case '/ops/memories':
       return handleMemories(params, res);
     case '/ops/memories/search':
       handleMemorySearch(params, res);
       return;
+    case '/ops/notifications':
+      return handleNotifications(params, res);
   }
 
   // Dynamic routes
