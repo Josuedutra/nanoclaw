@@ -69,6 +69,7 @@ export const OPS_HTTP_PORT = parseInt(
   process.env.OPS_HTTP_PORT || '7700',
   10,
 );
+export const OPS_HTTP_HOST = process.env.OPS_HTTP_HOST || '127.0.0.1';
 export const OS_HTTP_SECRET = process.env.OS_HTTP_SECRET || '';
 
 // Worker multi-node

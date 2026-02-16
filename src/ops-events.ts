@@ -70,11 +70,24 @@ const IDLE_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 let eventCounter = 0;
 let idleCheckInterval: ReturnType<typeof setInterval> | null = null;
 
+// --- Internal Listeners (for alert hooks, etc.) ---
+
+export type OpsEventListener = (type: OpsEventType, data: Record<string, unknown>) => void;
+const listeners: OpsEventListener[] = [];
+
 /**
- * Emit an event to all connected SSE clients.
+ * Register an internal listener for ops events.
+ * Listeners receive sanitized data (same as SSE clients).
+ */
+export function onOpsEvent(fn: OpsEventListener): void {
+  listeners.push(fn);
+}
+
+/**
+ * Emit an event to all connected SSE clients and internal listeners.
  */
 export function emitOpsEvent(type: OpsEventType, data: Record<string, unknown>): void {
-  if (connections.size === 0) return;
+  if (connections.size === 0 && listeners.length === 0) return;
 
   const event: OpsEvent = {
     type,
@@ -82,16 +95,24 @@ export function emitOpsEvent(type: OpsEventType, data: Record<string, unknown>):
     timestamp: new Date().toISOString(),
   };
 
-  eventCounter++;
-  const id = String(eventCounter);
-  const payload = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
+  // Notify internal listeners
+  for (const fn of listeners) {
+    try { fn(type, event.data); } catch { /* listener errors don't break event bus */ }
+  }
 
-  for (const [connId, conn] of connections) {
-    try {
-      conn.res.write(payload);
-      conn.lastEventAt = Date.now();
-    } catch {
-      connections.delete(connId);
+  // Broadcast to SSE clients
+  if (connections.size > 0) {
+    eventCounter++;
+    const id = String(eventCounter);
+    const payload = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
+
+    for (const [connId, conn] of connections) {
+      try {
+        conn.res.write(payload);
+        conn.lastEventAt = Date.now();
+      } catch {
+        connections.delete(connId);
+      }
     }
   }
 }

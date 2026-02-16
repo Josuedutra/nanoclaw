@@ -37,7 +37,9 @@ import { startIpcWatcher } from './ipc.js';
 import { formatMessages, formatOutbound } from './router.js';
 import { initExtBroker } from './ext-broker.js';
 import { startGovLoop } from './gov-loop.js';
+import { startAlertHooks } from './ops-alerts.js';
 import { startOpsHttp } from './ops-http.js';
+import { runPreflight } from './preflight.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -451,6 +453,7 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  runPreflight();
   ensureContainerSystemRunning();
   initDatabase();
   initExtBroker();
@@ -459,6 +462,7 @@ async function main(): Promise<void> {
 
   // Start ops HTTP server (read-only visibility API)
   const opsServer = startOpsHttp();
+  startAlertHooks();
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
@@ -506,7 +510,7 @@ async function main(): Promise<void> {
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
-      const text = formatOutbound(whatsapp, rawText);
+      const text = formatOutbound(rawText);
       if (text) await whatsapp.sendMessage(jid, text);
     },
     getSessions: () => sessions,

@@ -5,7 +5,7 @@
  */
 import http from 'http';
 
-import { OPS_HTTP_PORT } from './config.js';
+import { OPS_HTTP_HOST, OPS_HTTP_PORT } from './config.js';
 import {
   getAllGovTasks,
   getGovActivities,
@@ -459,15 +459,17 @@ function route(
 /**
  * Start the ops HTTP server. Returns the server instance for shutdown.
  * Pass port=0 in tests to get a random available port.
+ * Default host is 127.0.0.1 (loopback only). Set OPS_HTTP_HOST=0.0.0.0 to expose.
  */
-export function startOpsHttp(port?: number): http.Server {
+export function startOpsHttp(port?: number, host?: string): http.Server {
   const listenPort = port ?? OPS_HTTP_PORT;
+  const listenHost = host ?? OPS_HTTP_HOST;
   const server = http.createServer(route);
 
   startSseIdleCheck();
 
-  server.listen(listenPort, () => {
-    logger.info({ port: listenPort }, 'Ops HTTP server started');
+  server.listen(listenPort, listenHost, () => {
+    logger.info({ port: listenPort, host: listenHost }, 'Ops HTTP server started');
   });
 
   return server;

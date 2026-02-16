@@ -52,6 +52,40 @@ npm run ops:status   # Check task counts, products, ext_calls
 npm run test         # Run full test suite (uses :memory: DB, won't affect restored data)
 ```
 
+## Automated Daily Backups (systemd)
+
+Install the timer for daily backups at 03:00 UTC with automatic pruning:
+
+```bash
+sudo cp docs/nanoclaw-backup.service /etc/systemd/system/
+sudo cp docs/nanoclaw-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nanoclaw-backup.timer
+```
+
+Check timer status:
+```bash
+systemctl status nanoclaw-backup.timer
+systemctl list-timers nanoclaw-backup.timer
+```
+
+### Retention Policy
+
+The backup service runs `scripts/prune-backups.ts` after each backup. Default: keep 7 most recent backups.
+
+To change retention:
+```bash
+# In nanoclaw-backup.service, modify ExecStartPost:
+ExecStartPost=/usr/bin/node scripts/prune-backups.ts --keep 14
+```
+
+### Manual Pruning
+
+```bash
+node scripts/prune-backups.ts           # Keep 7 (default)
+node scripts/prune-backups.ts --keep 3  # Keep 3
+```
+
 ## Disaster Recovery Drill
 
 1. Create a backup: `npm run ops:backup`
