@@ -1,14 +1,7 @@
 [Unit]
-Description=NanoClaw Daily Backup
-After=network.target
+Description=NanoClaw backup (store + db)
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/node scripts/backup-os.ts
-ExecStartPost=/usr/bin/node scripts/prune-backups.ts
-WorkingDirectory=/opt/nanoclaw
-User=nanoclaw
-Group=nanoclaw
-NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=/opt/nanoclaw/backups /opt/nanoclaw/store
+WorkingDirectory=/root/nanoclaw
+ExecStart=/root/nanoclaw/scripts/backup-store.sh

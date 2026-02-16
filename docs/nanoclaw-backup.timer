@@ -1,10 +1,9 @@
 [Unit]
-Description=NanoClaw Daily Backup Timer
+Description=Run NanoClaw backup daily
 
 [Timer]
-OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-* 03:15:00
 Persistent=true
-RandomizedDelaySec=300
 
 [Install]
 WantedBy=timers.target
