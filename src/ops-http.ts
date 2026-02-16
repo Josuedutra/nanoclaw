@@ -21,6 +21,7 @@ import {
   listProducts,
 } from './gov-db.js';
 import { routeWriteAction } from './ops-actions.js';
+import { getCockpitTopics } from './db.js';
 import { routeWorkerCallback } from './worker-callbacks.js';
 import { handleSseConnection, startSseIdleCheck } from './ops-events.js';
 import {
@@ -368,20 +369,27 @@ function handleMessages(
   res: http.ServerResponse,
 ): void {
   const db = getDb();
-
-  // Find main group JID
-  const mainRow = db.prepare(
-    "SELECT jid FROM registered_groups WHERE folder = 'main' LIMIT 1",
-  ).get() as { jid: string } | undefined;
-
-  if (!mainRow) {
-    json(res, 200, { messages: [], group_jid: null });
-    return;
-  }
-
-  const groupJid = mainRow.jid;
   const limit = Math.min(parseInt(params.get('limit') || '50', 10) || 50, 200);
   const before = params.get('before') || '';
+  const topicId = params.get('topic_id') || '';
+
+  let chatJid: string;
+
+  if (topicId) {
+    // Topic mode: use virtual JID
+    chatJid = `cockpit:${topicId}`;
+  } else {
+    // Legacy mode: main group JID
+    const mainRow = db.prepare(
+      "SELECT jid FROM registered_groups WHERE folder = 'main' LIMIT 1",
+    ).get() as { jid: string } | undefined;
+
+    if (!mainRow) {
+      json(res, 200, { messages: [], group_jid: null });
+      return;
+    }
+    chatJid = mainRow.jid;
+  }
 
   let sql: string;
   let args: unknown[];
@@ -389,12 +397,12 @@ function handleMessages(
     sql = `SELECT id, sender_name, content, timestamp, is_bot_message
            FROM messages WHERE chat_jid = ? AND timestamp < ?
            ORDER BY timestamp DESC LIMIT ?`;
-    args = [groupJid, before, limit];
+    args = [chatJid, before, limit];
   } else {
     sql = `SELECT id, sender_name, content, timestamp, is_bot_message
            FROM messages WHERE chat_jid = ?
            ORDER BY timestamp DESC LIMIT ?`;
-    args = [groupJid, limit];
+    args = [chatJid, limit];
   }
 
   const rows = db.prepare(sql).all(...args) as Array<{
@@ -416,8 +424,18 @@ function handleMessages(
       timestamp: r.timestamp,
       is_bot_message: r.is_bot_message === 1,
     })),
-    group_jid: groupJid,
+    group_jid: chatJid,
+    topic_id: topicId || undefined,
   });
+}
+
+function handleTopics(
+  params: URLSearchParams,
+  res: http.ServerResponse,
+): void {
+  const groupFolder = params.get('group') || undefined;
+  const topics = getCockpitTopics(groupFolder);
+  json(res, 200, { topics });
 }
 
 function handleNotifications(
@@ -499,6 +517,8 @@ function route(
       return handleWorkers(req, res);
     case '/ops/messages':
       return handleMessages(params, res);
+    case '/ops/topics':
+      return handleTopics(params, res);
     case '/ops/memories':
       return handleMemories(params, res);
     case '/ops/memories/search':

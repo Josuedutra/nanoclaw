@@ -222,14 +222,15 @@ describe('GET /ops/messages', () => {
 // === POST /ops/actions/chat ===
 
 describe('POST /ops/actions/chat', () => {
-  it('stores message in database and returns ok', async () => {
-    seedMainGroup();
+  it('stores message in database and returns ok with topic_id', async () => {
     const res = await post('/ops/actions/chat', { message: 'Hello from cockpit' });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.queued).toBe(true);
+    expect(res.body.topic_id).toBeDefined();
+    const topicId = res.body.topic_id as string;
 
-    // Verify message was stored
+    // Verify message was stored with virtual JID
     const db = getDb();
     const row = db.prepare(
       "SELECT * FROM messages WHERE sender = 'cockpit' ORDER BY timestamp DESC LIMIT 1",
@@ -237,7 +238,7 @@ describe('POST /ops/actions/chat', () => {
     expect(row).toBeDefined();
     expect(row!.content).toBe('Hello from cockpit');
     expect(row!.sender_name).toBe('Owner');
-    expect(row!.chat_jid).toBe('main-group@g.us');
+    expect(row!.chat_jid).toBe(`cockpit:${topicId}`);
   });
 
   it('rejects empty message (400)', async () => {
@@ -261,10 +262,12 @@ describe('POST /ops/actions/chat', () => {
     expect(res.body.error).toContain('4000');
   });
 
-  it('returns 400 when no main group registered', async () => {
+  it('auto-creates topic when no topic_id provided', async () => {
     const res = await post('/ops/actions/chat', { message: 'Hello' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toContain('main group');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.topic_id).toBeDefined();
+    expect((res.body.topic_id as string).startsWith('topic-')).toBe(true);
   });
 
   it('rejects without write secret (401)', async () => {
@@ -285,11 +288,11 @@ describe('POST /ops/actions/chat', () => {
     expect(res.status).toBe(401);
   });
 
-  it('stored message is retrievable via GET /ops/messages', async () => {
-    seedMainGroup();
-    await post('/ops/actions/chat', { message: 'Roundtrip test' });
+  it('stored message is retrievable via GET /ops/messages with topic_id', async () => {
+    const chatRes = await post('/ops/actions/chat', { message: 'Roundtrip test' });
+    const topicId = chatRes.body.topic_id as string;
 
-    const res = await get('/ops/messages');
+    const res = await get(`/ops/messages?topic_id=${topicId}`);
     expect(res.status).toBe(200);
     const messages = res.body.messages as Array<{ content: string; sender_name: string }>;
     const cockpitMsg = messages.find((m) => m.content === 'Roundtrip test');

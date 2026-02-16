@@ -5,7 +5,15 @@
  */
 import http from 'http';
 
-import { getDb, storeMessageDirect } from './db.js';
+import {
+  createCockpitTopic,
+  getCockpitTopicById,
+  getCockpitTopics,
+  getDb,
+  storeChatMetadata,
+  storeMessageDirect,
+  updateTopicActivity,
+} from './db.js';
 import {
   createNotification,
   getGovApprovals,
@@ -685,7 +693,7 @@ async function handleActionChat(
   body: Record<string, unknown>,
   res: http.ServerResponse,
 ): Promise<void> {
-  const { message } = body;
+  const { message, topic_id, group } = body;
 
   if (!message || typeof message !== 'string') {
     json(res, 400, { error: 'Missing required field: message' });
@@ -696,23 +704,37 @@ async function handleActionChat(
     return;
   }
 
-  // Find main group JID
-  const db = getDb();
-  const mainRow = db.prepare(
-    "SELECT jid FROM registered_groups WHERE folder = 'main' LIMIT 1",
-  ).get() as { jid: string } | undefined;
-
-  if (!mainRow) {
-    json(res, 400, { error: 'No main group registered. Send a message via WhatsApp first.' });
-    return;
-  }
-
+  const groupFolder = (typeof group === 'string' && group) ? group : 'main';
   const rand = Math.random().toString(36).slice(2, 8);
   const now = new Date().toISOString();
 
+  // If topic_id provided, use it; otherwise auto-create a new topic
+  let topicId = typeof topic_id === 'string' ? topic_id : '';
+  if (!topicId) {
+    topicId = `topic-${Date.now()}-${rand}`;
+    createCockpitTopic({
+      id: topicId,
+      group_folder: groupFolder,
+      title: (message as string).slice(0, 60),
+    });
+    // Create chat entry for the virtual JID so FK constraint is satisfied
+    storeChatMetadata(`cockpit:${topicId}`, new Date().toISOString(), (message as string).slice(0, 60));
+    logger.info({ topicId, groupFolder }, 'Auto-created cockpit topic');
+  } else {
+    // Verify topic exists
+    const topic = getCockpitTopicById(topicId);
+    if (!topic) {
+      json(res, 404, { error: 'Topic not found' });
+      return;
+    }
+  }
+
+  // Virtual JID for this topic
+  const virtualJid = `cockpit:${topicId}`;
+
   storeMessageDirect({
     id: `cockpit-${Date.now()}-${rand}`,
-    chat_jid: mainRow.jid,
+    chat_jid: virtualJid,
     sender: 'cockpit',
     sender_name: 'Owner',
     content: message,
@@ -721,9 +743,42 @@ async function handleActionChat(
     is_bot_message: false,
   });
 
-  logger.info({ chatJid: mainRow.jid }, 'Cockpit chat message stored');
+  updateTopicActivity(topicId);
 
-  json(res, 200, { ok: true, queued: true });
+  logger.info({ topicId, groupFolder, virtualJid }, 'Cockpit topic message stored');
+
+  // Notify the message loop via the cockpit message callback
+  if (cockpitMessageCallback) {
+    cockpitMessageCallback(topicId, groupFolder);
+  }
+
+  json(res, 200, { ok: true, topic_id: topicId, queued: true });
+}
+
+async function handleActionCreateTopic(
+  body: Record<string, unknown>,
+  res: http.ServerResponse,
+): Promise<void> {
+  const { group, title } = body;
+  const groupFolder = (typeof group === 'string' && group) ? group : 'main';
+  const topicTitle = (typeof title === 'string' && title) ? title : 'New Topic';
+
+  const rand = Math.random().toString(36).slice(2, 8);
+  const topicId = `topic-${Date.now()}-${rand}`;
+
+  createCockpitTopic({ id: topicId, group_folder: groupFolder, title: topicTitle });
+  storeChatMetadata(`cockpit:${topicId}`, new Date().toISOString(), topicTitle);
+
+  json(res, 200, { ok: true, topic: { id: topicId, group_folder: groupFolder, title: topicTitle } });
+}
+
+// Callback for notifying the message loop about new cockpit messages
+let cockpitMessageCallback: ((topicId: string, groupFolder: string) => void) | null = null;
+
+export function setCockpitMessageCallback(
+  cb: (topicId: string, groupFolder: string) => void,
+): void {
+  cockpitMessageCallback = cb;
 }
 
 // --- Sprint 10E: Comment + Notifications handlers ---
@@ -875,6 +930,8 @@ export async function routeWriteAction(
       return handleActionOverride(body, res);
     case '/ops/actions/chat':
       return handleActionChat(body, res);
+    case '/ops/actions/topic':
+      return handleActionCreateTopic(body, res);
     case '/ops/actions/dod':
       return handleActionUpdateDoD(body, res);
     case '/ops/actions/evidence':

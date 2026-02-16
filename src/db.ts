@@ -119,8 +119,27 @@ export function initDatabase(): void {
   createLimitsSchema(db);
   createWorkersSchema(db);
 
+  createCockpitTopicsSchema(db);
+
   // Migrate from JSON files if they exist
   migrateJsonState();
+}
+
+// --- Cockpit Topics Schema ---
+
+function createCockpitTopicsSchema(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS cockpit_topics (
+      id TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      title TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_activity TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active'
+    );
+    CREATE INDEX IF NOT EXISTS idx_cockpit_topics_group
+      ON cockpit_topics(group_folder, status);
+  `);
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -132,6 +151,7 @@ export function _initTestDatabase(): void {
   createMemorySchema(db);
   createLimitsSchema(db);
   createWorkersSchema(db);
+  createCockpitTopicsSchema(db);
 }
 
 /**
@@ -621,4 +641,68 @@ function migrateJsonState(): void {
       setRegisteredGroup(jid, group);
     }
   }
+}
+
+// --- Cockpit Topics CRUD ---
+
+export interface CockpitTopic {
+  id: string;
+  group_folder: string;
+  title: string;
+  created_at: string;
+  last_activity: string;
+  status: string;
+}
+
+export function createCockpitTopic(topic: {
+  id: string;
+  group_folder: string;
+  title: string;
+}): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO cockpit_topics (id, group_folder, title, created_at, last_activity, status)
+     VALUES (?, ?, ?, ?, ?, 'active')`,
+  ).run(topic.id, topic.group_folder, topic.title, now, now);
+}
+
+export function getCockpitTopics(groupFolder?: string): CockpitTopic[] {
+  if (groupFolder) {
+    return db
+      .prepare(
+        `SELECT * FROM cockpit_topics WHERE group_folder = ? AND status = 'active'
+         ORDER BY last_activity DESC`,
+      )
+      .all(groupFolder) as CockpitTopic[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM cockpit_topics WHERE status = 'active'
+       ORDER BY last_activity DESC`,
+    )
+    .all() as CockpitTopic[];
+}
+
+export function getCockpitTopicById(topicId: string): CockpitTopic | undefined {
+  return db
+    .prepare('SELECT * FROM cockpit_topics WHERE id = ?')
+    .get(topicId) as CockpitTopic | undefined;
+}
+
+export function updateTopicActivity(topicId: string): void {
+  db.prepare(
+    'UPDATE cockpit_topics SET last_activity = ? WHERE id = ?',
+  ).run(new Date().toISOString(), topicId);
+}
+
+export function updateTopicTitle(topicId: string, title: string): void {
+  db.prepare(
+    'UPDATE cockpit_topics SET title = ? WHERE id = ?',
+  ).run(title, topicId);
+}
+
+export function archiveCockpitTopic(topicId: string): void {
+  db.prepare(
+    "UPDATE cockpit_topics SET status = 'archived' WHERE id = ?",
+  ).run(topicId);
 }

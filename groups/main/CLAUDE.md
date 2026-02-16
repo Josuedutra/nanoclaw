@@ -303,3 +303,17 @@ ext_grant(developer, cloud-logs, L1)
 ext_grant(security, github, L1)
 ext_grant(security, cloud-logs, L1)
 ```
+
+---
+
+## Sacred Files
+
+At session start, review these files for context:
+1. Read `team.md` — know your team and current agent levels
+2. Read `memory.md` — recall recent projects, decisions, lessons
+3. Read `working.md` — check current tasks and blockers
+4. Read `heartbeat.md` — check scheduled automations
+
+Before compaction or ending a session, update:
+1. `working.md` — update current task status
+2. Store lessons via `store_memory` with task ID as source_ref

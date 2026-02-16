@@ -25,8 +25,8 @@ vi.mock('./config.js', () => ({
   PROJECT_ROOT: tmpDir,
 }));
 
-// Mock container-runner to avoid actual container spawning
-vi.mock('./container-runner.js', () => ({
+// Mock process-runner to avoid actual process spawning
+vi.mock('./process-runner.js', () => ({
   runContainerAgent: vi.fn().mockResolvedValue(undefined),
   writeTasksSnapshot: vi.fn(),
 }));
@@ -50,7 +50,9 @@ import {
 import { grantCapability } from './ext-broker-db.js';
 import { registerProvider } from './ext-broker-providers.js';
 import {
+  buildApprovalPrompt,
   buildContextPack,
+  buildGovTaskPrompt,
   buildTaskContext,
   ensureIpcGroupSecret,
   writeExtCapabilitiesSnapshot,
@@ -730,32 +732,35 @@ describe('buildContextPack', () => {
   });
 });
 
+// --- Helper: seed memory ---
+
+function seedMemory(overrides: Record<string, unknown>) {
+  const now = new Date().toISOString();
+  const defaults = {
+    id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    content: 'Test memory content',
+    content_hash: 'abc123',
+    level: 'L1',
+    scope: 'COMPANY',
+    product_id: null,
+    group_folder: 'developer',
+    tags: null,
+    pii_detected: 0,
+    pii_types: null,
+    source_type: 'agent',
+    source_ref: null,
+    policy_version: null,
+    created_at: now,
+    updated_at: now,
+  };
+  const mem = { ...defaults, ...overrides };
+  storeMemory(mem as Parameters<typeof storeMemory>[0]);
+  return mem;
+}
+
 // --- Sprint 4: Memory injection in dispatch ---
 
 describe('memory injection in buildContextPack', () => {
-  function seedMemory(overrides: Record<string, unknown>) {
-    const now = new Date().toISOString();
-    const defaults = {
-      id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      content: 'Test memory content',
-      content_hash: 'abc123',
-      level: 'L1',
-      scope: 'COMPANY',
-      product_id: null,
-      group_folder: 'developer',
-      tags: null,
-      pii_detected: 0,
-      pii_types: null,
-      source_type: 'agent',
-      source_ref: null,
-      policy_version: null,
-      created_at: now,
-      updated_at: now,
-    };
-    const mem = { ...defaults, ...overrides };
-    storeMemory(mem as Parameters<typeof storeMemory>[0]);
-    return mem;
-  }
 
   it('injects relevant memories in context pack', () => {
     seedMemory({ id: 'mem-auth', content: 'Authentication uses JWT tokens with RS256 signing', group_folder: 'developer', level: 'L1' });
@@ -797,5 +802,82 @@ describe('memory injection in buildContextPack', () => {
     // Should see prod-a memory but not prod-b (product isolation)
     expect(pack).toContain('Product A specific API');
     expect(pack).not.toContain('Product B specific API');
+  });
+});
+
+// --- Phase 4: Learning prompts in buildGovTaskPrompt ---
+
+describe('buildGovTaskPrompt learning prompts', () => {
+  it('includes "Before starting" section', () => {
+    seedTask({ id: 'lp-1', title: 'Test task', state: 'DOING', assigned_group: 'developer', scope: 'COMPANY' });
+    const prompt = buildGovTaskPrompt(getGovTaskById('lp-1')!);
+    expect(prompt).toContain('## Before starting');
+    expect(prompt).toContain('Read working.md');
+    expect(prompt).toContain('recall_memory');
+    expect(prompt).toContain('Check conversations/');
+  });
+
+  it('includes "After completing" section with task ID', () => {
+    seedTask({ id: 'lp-2', title: 'Test task', state: 'DOING', assigned_group: 'developer', scope: 'COMPANY' });
+    const prompt = buildGovTaskPrompt(getGovTaskById('lp-2')!);
+    expect(prompt).toContain('## After completing');
+    expect(prompt).toContain('store_memory');
+    expect(prompt).toContain('source_ref');
+    expect(prompt).toContain('lp-2');
+    expect(prompt).toContain('Update working.md');
+    expect(prompt).toContain('gov_transition to REVIEW');
+  });
+
+  it('includes memory injection with limit 10', () => {
+    // Seed many memories
+    for (let i = 0; i < 12; i++) {
+      seedMemory({
+        id: `mem-lp-${i}`,
+        content: `Authentication memory number ${i} about login flow`,
+        group_folder: 'developer',
+        level: 'L1',
+      });
+    }
+    seedTask({ id: 'lp-3', title: 'Fix authentication login flow', state: 'DOING', assigned_group: 'developer', scope: 'COMPANY' });
+
+    const prompt = buildGovTaskPrompt(getGovTaskById('lp-3')!);
+    expect(prompt).toContain('Relevant Memories');
+  });
+});
+
+describe('buildApprovalPrompt learning prompts', () => {
+  it('includes "After reviewing" section with task ID', () => {
+    seedTask({ id: 'ap-1', title: 'Review task', state: 'APPROVAL', gate: 'Security', assigned_group: 'developer', scope: 'COMPANY' });
+    const prompt = buildApprovalPrompt(getGovTaskById('ap-1')!, 'Security');
+    expect(prompt).toContain('## After reviewing');
+    expect(prompt).toContain('Store security insights');
+    expect(prompt).toContain('source_ref');
+    expect(prompt).toContain('ap-1');
+  });
+
+  it('includes reviewer contract', () => {
+    seedTask({ id: 'ap-2', title: 'Review task', state: 'APPROVAL', gate: 'Security', assigned_group: 'developer', scope: 'COMPANY' });
+    const prompt = buildApprovalPrompt(getGovTaskById('ap-2')!, 'Security');
+    expect(prompt).toContain('Reviewer Contract');
+    expect(prompt).toContain('APPROVE');
+    expect(prompt).toContain('BLOCK');
+    expect(prompt).toContain('REWORK');
+  });
+
+  it('includes developer learnings from cross-agent handoff', () => {
+    seedTask({ id: 'ap-3', title: 'Review auth task', state: 'APPROVAL', gate: 'Security', assigned_group: 'developer', scope: 'COMPANY' });
+    // Seed a memory with source_ref matching the task ID
+    seedMemory({
+      id: 'mem-dev-learning',
+      content: 'Used bcrypt for password hashing with cost factor 12',
+      group_folder: 'developer',
+      level: 'L0',
+      source_ref: 'ap-3',
+    });
+
+    const prompt = buildApprovalPrompt(getGovTaskById('ap-3')!, 'Security');
+    // The context pack should include developer learnings
+    expect(prompt).toContain('Developer Learnings');
+    expect(prompt).toContain('bcrypt');
   });
 });

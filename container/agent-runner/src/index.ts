@@ -54,7 +54,14 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+// Workspace paths: configurable via env vars for process-runner mode,
+// fallback to /workspace/* for container mode.
+const WORKSPACE_GROUP = process.env.NANOCLAW_WORKSPACE_GROUP || '/workspace/group';
+const WORKSPACE_IPC = process.env.NANOCLAW_WORKSPACE_IPC || '/workspace/ipc';
+const WORKSPACE_GLOBAL = process.env.NANOCLAW_WORKSPACE_GLOBAL || '/workspace/global';
+const WORKSPACE_EXTRA = process.env.NANOCLAW_WORKSPACE_EXTRA || '/workspace/extra';
+
+const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
@@ -139,8 +146,161 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
   return null;
 }
 
+// --- Structured Memory Extraction ---
+
+interface SessionExtraction {
+  summary: string;
+  lessons: string[];
+  decisions: string[];
+  projects: string[];
+  pending: string[];
+  timestamp: string;
+}
+
+function extractSessionKnowledge(messages: ParsedMessage[]): SessionExtraction {
+  const assistantText = messages
+    .filter(m => m.role === 'assistant')
+    .map(m => m.content)
+    .join('\n');
+
+  const extraction: SessionExtraction = {
+    summary: '',
+    lessons: [],
+    decisions: [],
+    projects: [],
+    pending: [],
+    timestamp: new Date().toISOString(),
+  };
+
+  // Extract lessons: things learned, insights
+  const lessonPatterns = [
+    /(?:learned|discovered|realized|found out|turns out|important to note|key insight)[:\s]+(.+?)(?:\.\s|$)/gi,
+    /(?:lesson|takeaway|insight)[:\s]+(.+?)(?:\.\s|$)/gi,
+  ];
+  for (const pattern of lessonPatterns) {
+    let match;
+    while ((match = pattern.exec(assistantText)) !== null) {
+      if (match[1].length > 20 && match[1].length < 500) {
+        extraction.lessons.push(match[1].trim());
+      }
+    }
+  }
+
+  // Extract decisions: choices made
+  const decisionPatterns = [
+    /(?:decided to|decision:|chose to|going with|we'll use|selected)[:\s]+(.+?)(?:\.\s|$)/gi,
+  ];
+  for (const pattern of decisionPatterns) {
+    let match;
+    while ((match = pattern.exec(assistantText)) !== null) {
+      if (match[1].length > 20 && match[1].length < 500) {
+        extraction.decisions.push(match[1].trim());
+      }
+    }
+  }
+
+  // Gov task IDs mentioned
+  const taskPattern = /gov-\d{8}T\d{6}Z-\w+/g;
+  let taskMatch;
+  while ((taskMatch = taskPattern.exec(assistantText)) !== null) {
+    if (!extraction.projects.includes(taskMatch[0])) {
+      extraction.projects.push(taskMatch[0]);
+    }
+  }
+
+  // Summary: first assistant message truncated
+  const firstAssistant = messages.find(m => m.role === 'assistant');
+  extraction.summary = firstAssistant
+    ? firstAssistant.content.slice(0, 200)
+    : 'No summary available';
+
+  return extraction;
+}
+
+function updateMemorySummary(extraction: SessionExtraction): void {
+  const memoryPath = path.join(WORKSPACE_GROUP, 'memory.md');
+
+  // Read existing content to merge, not replace
+  let existing = '';
+  try { existing = fs.readFileSync(memoryPath, 'utf-8'); } catch { /* new file */ }
+
+  // Extract existing sections to preserve accumulated data
+  const existingLessons = extractSection(existing, 'Lessons Learned') || [];
+  const existingDecisions = extractSection(existing, 'Key Decisions') || [];
+  const existingProjects = extractSection(existing, 'Active Projects') || [];
+
+  // Merge new with existing (deduplicate, keep last 15)
+  const allLessons = [...new Set([...existingLessons, ...extraction.lessons])].slice(-15);
+  const allDecisions = [...new Set([...existingDecisions, ...extraction.decisions])].slice(-15);
+  const allProjects = [...new Set([...existingProjects, ...extraction.projects])].slice(-10);
+
+  let content = '# Memory Summary\n\n';
+  content += `Last consolidated: ${extraction.timestamp}\n\n`;
+
+  if (allProjects.length > 0) {
+    content += '## Active Projects\n';
+    for (const p of allProjects) content += `- ${p}\n`;
+    content += '\n';
+  }
+
+  if (allDecisions.length > 0) {
+    content += '## Key Decisions\n';
+    for (const d of allDecisions) content += `- ${d}\n`;
+    content += '\n';
+  }
+
+  if (allLessons.length > 0) {
+    content += '## Lessons Learned\n';
+    for (const l of allLessons) content += `- ${l}\n`;
+    content += '\n';
+  }
+
+  if (extraction.pending.length > 0) {
+    content += '## Pending Items\n';
+    for (const p of extraction.pending) content += `- ${p}\n`;
+    content += '\n';
+  }
+
+  fs.writeFileSync(memoryPath, content);
+}
+
+function extractSection(markdown: string, heading: string): string[] {
+  const pattern = new RegExp(`## ${heading}\\n([\\s\\S]*?)(?=\\n##|$)`, 'i');
+  const match = pattern.exec(markdown);
+  if (!match) return [];
+  return match[1]
+    .split('\n')
+    .filter(l => l.startsWith('- '))
+    .map(l => l.slice(2).trim())
+    .filter(Boolean);
+}
+
+function writeIpcMemStore(data: {
+  content: string;
+  level: string;
+  tags: string[];
+  source_ref: string;
+}): void {
+  const tasksDir = path.join(WORKSPACE_IPC, 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  const filepath = path.join(tasksDir, filename);
+  const tempPath = `${filepath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify({
+    type: 'mem_store',
+    request_id: `extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    content: data.content,
+    level: data.level,
+    tags: data.tags,
+    scope: 'COMPANY',
+    source_ref: data.source_ref,
+  }));
+  fs.renameSync(tempPath, filepath);
+}
+
 /**
  * Archive the full transcript to conversations/ before compaction.
+ * Also extracts structured knowledge (lessons, decisions) and stores as memories.
  */
 function createPreCompactHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
@@ -162,10 +322,11 @@ function createPreCompactHook(): HookCallback {
         return {};
       }
 
+      // 1. Archive transcript (existing behavior)
       const summary = getSessionSummary(sessionId, transcriptPath);
       const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      const conversationsDir = '/workspace/group/conversations';
+      const conversationsDir = path.join(WORKSPACE_GROUP, 'conversations');
       fs.mkdirSync(conversationsDir, { recursive: true });
 
       const date = new Date().toISOString().split('T')[0];
@@ -174,10 +335,38 @@ function createPreCompactHook(): HookCallback {
 
       const markdown = formatTranscriptMarkdown(messages, summary);
       fs.writeFileSync(filePath, markdown);
-
       log(`Archived conversation to ${filePath}`);
+
+      // 2. Extract structured data
+      const extraction = extractSessionKnowledge(messages);
+
+      // 3. Save extraction as JSON alongside the transcript
+      const extractionPath = path.join(conversationsDir, `${date}-${name}.json`);
+      fs.writeFileSync(extractionPath, JSON.stringify(extraction, null, 2));
+      log(`Extracted ${extraction.lessons.length} lessons, ${extraction.decisions.length} decisions`);
+
+      // 4. Update memory.md with latest extraction (merges with existing)
+      updateMemorySummary(extraction);
+
+      // 5. Store lessons as memories via IPC (host processes these)
+      for (const lesson of extraction.lessons) {
+        writeIpcMemStore({
+          content: lesson,
+          level: 'L0',
+          tags: ['lesson', 'auto-extracted'],
+          source_ref: `session:${sessionId}`,
+        });
+      }
+      for (const decision of extraction.decisions) {
+        writeIpcMemStore({
+          content: decision,
+          level: 'L1',
+          tags: ['decision', 'auto-extracted'],
+          source_ref: `session:${sessionId}`,
+        });
+      }
     } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+      log(`Failed to archive/extract: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return {};
@@ -391,7 +580,7 @@ async function runQuery(
   let resultCount = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  const globalClaudeMdPath = path.join(WORKSPACE_GLOBAL, 'CLAUDE.md');
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
@@ -400,7 +589,7 @@ async function runQuery(
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
   const extraDirs: string[] = [];
-  const extraBase = '/workspace/extra';
+  const extraBase = WORKSPACE_EXTRA;
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
       const fullPath = path.join(extraBase, entry);
@@ -416,7 +605,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      cwd: '/workspace/group',
+      cwd: WORKSPACE_GROUP,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,

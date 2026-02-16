@@ -4,13 +4,9 @@ import { opsFetch } from '@/lib/ops-fetch';
 export async function GET(request: NextRequest) {
   try {
     const params: Record<string, string> = {};
-    const limit = request.nextUrl.searchParams.get('limit');
-    if (limit) params.limit = limit;
-    const before = request.nextUrl.searchParams.get('before');
-    if (before) params.before = before;
-    const topicId = request.nextUrl.searchParams.get('topic_id');
-    if (topicId) params.topic_id = topicId;
-    const data = await opsFetch('/ops/messages', params);
+    const group = request.nextUrl.searchParams.get('group');
+    if (group) params.group = group;
+    const data = await opsFetch('/ops/topics', params);
     return NextResponse.json(data);
   } catch (err) {
     return NextResponse.json(

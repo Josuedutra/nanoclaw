@@ -13,13 +13,14 @@ interface Message {
 }
 
 interface ChatWindowProps {
-  initialMessages: Message[];
+  topicId: string | null;
+  group: string;
 }
 
 async function writeAction(
   path: string,
   body: Record<string, unknown>,
-): Promise<{ ok?: boolean; error?: string }> {
+): Promise<Record<string, unknown>> {
   const csrf = sessionStorage.getItem('csrf') || '';
   const res = await fetch(path, {
     method: 'POST',
@@ -32,56 +33,74 @@ async function writeAction(
   return res.json();
 }
 
-export function ChatWindow({ initialMessages }: ChatWindowProps) {
-  const [messages, setMessages] = useState<Message[]>(initialMessages);
+export function ChatWindow({ topicId, group }: ChatWindowProps) {
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [currentTopicId, setCurrentTopicId] = useState(topicId);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const messagesRef = useRef<Message[]>(messages);
 
-  // Keep ref in sync for SSE callback
-  messagesRef.current = messages;
+  // Load messages when topic changes
+  useEffect(() => {
+    setCurrentTopicId(topicId);
+    if (!topicId) {
+      setMessages([]);
+      return;
+    }
+
+    fetch(`/api/ops/messages?topic_id=${topicId}&limit=100`)
+      .then((r) => r.json())
+      .then((data: { messages?: Message[] }) => {
+        if (data.messages) setMessages(data.messages);
+      })
+      .catch(() => {});
+  }, [topicId]);
 
   // Auto-scroll to bottom
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Poll for new messages every 5s
+  // Poll for new messages every 3s
   useEffect(() => {
-    const poll = setInterval(async () => {
-      try {
-        const res = await fetch('/api/ops/messages?limit=100');
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.messages) {
-          setMessages(data.messages);
-        }
-      } catch { /* ignore poll errors */ }
-    }, 5000);
+    if (!currentTopicId) return;
+    const poll = setInterval(() => {
+      fetch(`/api/ops/messages?topic_id=${currentTopicId}&limit=100`)
+        .then((r) => r.json())
+        .then((data: { messages?: Message[] }) => {
+          if (data.messages) setMessages(data.messages);
+        })
+        .catch(() => {});
+    }, 3000);
     return () => clearInterval(poll);
-  }, []);
+  }, [currentTopicId]);
 
-  // SSE for real-time bot responses
-  const handleSseEvent = useCallback((event: SseEvent) => {
-    if (event.type === 'chat:message' && event.data.text) {
-      const sseMsg: Message = {
-        id: `sse-${Date.now()}`,
-        sender_name: (event.data.sender as string) || 'Agent',
-        content: event.data.text as string,
-        timestamp: event.data.timestamp as string || new Date().toISOString(),
-        is_bot_message: true,
-      };
-      // Append if not already present (dedup by content+timestamp)
-      setMessages((prev) => {
-        const exists = prev.some(
-          (m) => m.content === sseMsg.content && m.timestamp === sseMsg.timestamp,
-        );
-        return exists ? prev : [...prev, sseMsg];
-      });
-    }
-  }, []);
+  // SSE for real-time bot responses (filter by topicId)
+  const handleSseEvent = useCallback(
+    (event: SseEvent) => {
+      if (
+        event.type === 'chat:message' &&
+        event.data.text &&
+        event.data.topicId === currentTopicId
+      ) {
+        const sseMsg: Message = {
+          id: `sse-${Date.now()}`,
+          sender_name: (event.data.sender as string) || 'Agent',
+          content: event.data.text as string,
+          timestamp: (event.data.timestamp as string) || new Date().toISOString(),
+          is_bot_message: true,
+        };
+        setMessages((prev) => {
+          const exists = prev.some(
+            (m) => m.content === sseMsg.content && m.timestamp === sseMsg.timestamp,
+          );
+          return exists ? prev : [...prev, sseMsg];
+        });
+      }
+    },
+    [currentTopicId],
+  );
 
   useSse(handleSseEvent);
 
@@ -105,9 +124,16 @@ export function ChatWindow({ initialMessages }: ChatWindowProps) {
     setMessages((prev) => [...prev, optimisticMsg]);
 
     try {
-      const result = await writeAction('/api/write/chat/send', { message: text });
+      const result = await writeAction('/api/write/chat/send', {
+        message: text,
+        topic_id: currentTopicId || undefined,
+        group,
+      });
       if (!result.ok) {
-        setError(result.error || 'Failed to send message');
+        setError((result.error as string) || 'Failed to send message');
+      } else if (!currentTopicId && result.topic_id) {
+        // First message created a new topic — update state
+        setCurrentTopicId(result.topic_id as string);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send');
@@ -116,8 +142,16 @@ export function ChatWindow({ initialMessages }: ChatWindowProps) {
     }
   }
 
+  if (!topicId && !currentTopicId) {
+    return (
+      <div className="flex h-full items-center justify-center text-zinc-500">
+        Select a topic or create a new one to start chatting.
+      </div>
+    );
+  }
+
   return (
-    <div className="flex h-[calc(100vh-8rem)] flex-col">
+    <div className="flex h-full flex-col">
       {/* Messages */}
       <div className="flex-1 overflow-y-auto space-y-3 p-4">
         {messages.length === 0 && (

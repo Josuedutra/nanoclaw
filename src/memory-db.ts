@@ -267,6 +267,18 @@ export function deleteMemory(id: string): boolean {
   return result.changes > 0;
 }
 
+/** Search memories by source_ref (e.g. task ID). Returns up to `limit` results. */
+export function getMemoriesBySourceRef(
+  sourceRef: string,
+  limit = 10,
+): Memory[] {
+  return db
+    .prepare(
+      `SELECT * FROM memories WHERE source_ref = ? ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(sourceRef, limit) as Memory[];
+}
+
 /** Append an access log entry (audit trail). */
 export function logMemoryAccess(log: MemoryAccessLog): void {
   db.prepare(

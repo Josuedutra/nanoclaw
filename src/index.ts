@@ -16,12 +16,13 @@ import {
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
-} from './container-runner.js';
+} from './process-runner.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getCockpitTopicById,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -39,6 +40,7 @@ import { initExtBroker } from './ext-broker.js';
 import { startGovLoop } from './gov-loop.js';
 import { startAlertHooks } from './ops-alerts.js';
 import { emitOpsEvent } from './ops-events.js';
+import { setCockpitMessageCallback } from './ops-actions.js';
 import { startOpsHttp } from './ops-http.js';
 import { runPreflight } from './preflight.js';
 import { startSchedulerLoop } from './task-scheduler.js';
@@ -222,9 +224,11 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  sessionKeyOverride?: string,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const sessionKey = sessionKeyOverride || group.folder;
+  const sessionId = sessions[sessionKey];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -255,8 +259,8 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          sessions[sessionKey] = output.newSessionId;
+          setSession(sessionKey, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -277,8 +281,8 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      sessions[sessionKey] = output.newSessionId;
+      setSession(sessionKey, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -294,6 +298,111 @@ async function runAgent(
     logger.error({ group: group.name, err }, 'Agent error');
     return 'error';
   }
+}
+
+/**
+ * Process a cockpit topic message: route to the correct agent group.
+ * Called from ops-actions.ts via the cockpitMessageCallback.
+ */
+function handleCockpitTopicMessage(topicId: string, groupFolder: string): void {
+  const virtualJid = `cockpit:${topicId}`;
+
+  // Find the RegisteredGroup for this folder
+  const group = Object.values(registeredGroups).find(
+    (g) => g.folder === groupFolder,
+  );
+  if (!group) {
+    // If no WhatsApp group registered for this folder, create a synthetic one
+    // This allows cockpit-only agents (developer, security) that may not have a WhatsApp JID
+    const syntheticGroup: RegisteredGroup = {
+      name: groupFolder,
+      folder: groupFolder,
+      trigger: '',
+      added_at: new Date().toISOString(),
+      requiresTrigger: false,
+    };
+    processCockpitTopic(virtualJid, syntheticGroup, topicId);
+    return;
+  }
+
+  processCockpitTopic(virtualJid, group, topicId);
+}
+
+function processCockpitTopic(
+  virtualJid: string,
+  group: RegisteredGroup,
+  topicId: string,
+): void {
+  const sessionKey = `topic:${topicId}`;
+
+  // Get pending messages for this topic
+  const pendingMessages = getMessagesSince(virtualJid, lastAgentTimestamp[virtualJid] || '', ASSISTANT_NAME);
+  if (pendingMessages.length === 0) return;
+
+  const prompt = formatMessages(pendingMessages);
+
+  // Try piping to active container first
+  if (queue.sendMessage(virtualJid, prompt)) {
+    logger.debug({ topicId, count: pendingMessages.length }, 'Piped cockpit message to active container');
+    lastAgentTimestamp[virtualJid] = pendingMessages[pendingMessages.length - 1].timestamp;
+    saveState();
+    return;
+  }
+
+  // No active container — use enqueueTask with a custom function
+  const taskId = `cockpit-${topicId}-${Date.now()}`;
+  queue.enqueueTask(virtualJid, taskId, async () => {
+    const msgs = getMessagesSince(virtualJid, lastAgentTimestamp[virtualJid] || '', ASSISTANT_NAME);
+    if (msgs.length === 0) return;
+
+    const msgPrompt = formatMessages(msgs);
+    lastAgentTimestamp[virtualJid] = msgs[msgs.length - 1].timestamp;
+    saveState();
+
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        queue.closeStdin(virtualJid);
+      }, IDLE_TIMEOUT);
+    };
+
+    await runAgent(
+      group,
+      msgPrompt,
+      virtualJid,
+      async (result) => {
+        if (result.result) {
+          const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
+          const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+          if (text) {
+            // Store bot response in the topic's message stream
+            storeMessage({
+              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              chat_jid: virtualJid,
+              sender: ASSISTANT_NAME,
+              sender_name: ASSISTANT_NAME,
+              content: text,
+              timestamp: new Date().toISOString(),
+              is_from_me: true,
+              is_bot_message: true,
+            });
+            emitOpsEvent('chat:message', {
+              chatJid: virtualJid,
+              topicId,
+              text,
+              sender: ASSISTANT_NAME,
+              timestamp: new Date().toISOString(),
+            });
+          }
+          resetIdleTimer();
+        }
+      },
+      sessionKey,
+    );
+
+    if (idleTimer) clearTimeout(idleTimer);
+  });
 }
 
 async function startMessageLoop(): Promise<void> {
@@ -474,6 +583,9 @@ async function main(): Promise<void> {
   // Start ops HTTP server (read-only visibility API)
   const opsServer = startOpsHttp();
   startAlertHooks();
+
+  // Wire up cockpit topic message routing
+  setCockpitMessageCallback(handleCockpitTopicMessage);
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {

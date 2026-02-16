@@ -1,44 +1,115 @@
-import { opsFetch } from '@/lib/ops-fetch';
-import { ErrorCallout } from '@/components/ErrorCallout';
+'use client';
+
+import { Suspense, useState, useEffect, useCallback } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { TopicSidebar, type Topic } from '@/components/TopicSidebar';
 import { ChatWindow } from '@/components/ChatWindow';
 
-interface Message {
-  id: string;
-  sender_name: string;
-  content: string;
-  timestamp: string;
-  is_bot_message: boolean;
+async function writeAction(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const csrf = sessionStorage.getItem('csrf') || '';
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': csrf,
+    },
+    body: JSON.stringify(body),
+  });
+  return res.json();
 }
 
-interface MessagesResponse {
-  messages: Message[];
-  group_jid: string | null;
-}
+function ChatPageInner() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const [topics, setTopics] = useState<Topic[]>([]);
+  const [loading, setLoading] = useState(true);
 
-export default async function ChatPage() {
-  let data: MessagesResponse;
-  try {
-    data = await opsFetch<MessagesResponse>('/ops/messages', { limit: '100' });
-  } catch (err) {
+  const activeTopicId = searchParams.get('topic');
+  const activeGroup = searchParams.get('agent') || 'main';
+
+  // Load topics
+  useEffect(() => {
+    fetch('/api/ops/topics')
+      .then((r) => r.json())
+      .then((data: { topics?: Topic[] }) => {
+        if (data.topics) setTopics(data.topics);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleSelectTopic = useCallback(
+    (topicId: string) => {
+      const topic = topics.find((t) => t.id === topicId);
+      const agent = topic?.group_folder || 'main';
+      router.push(`/chat?agent=${agent}&topic=${topicId}`);
+    },
+    [router, topics],
+  );
+
+  const handleNewTopic = useCallback(
+    async (group: string) => {
+      try {
+        const result = await writeAction('/api/write/chat/topic', {
+          group,
+          title: 'New Topic',
+        });
+        if (result.ok) {
+          const topic = result.topic as { id: string; group_folder: string; title: string };
+          setTopics((prev) => [
+            {
+              ...topic,
+              created_at: new Date().toISOString(),
+              last_activity: new Date().toISOString(),
+              status: 'active',
+            },
+            ...prev,
+          ]);
+          router.push(`/chat?agent=${group}&topic=${topic.id}`);
+        }
+      } catch {
+        // silently fail
+      }
+    },
+    [router],
+  );
+
+  if (loading) {
     return (
-      <div className="space-y-4">
-        <h2 className="text-xl font-bold">Chat</h2>
-        <ErrorCallout
-          message={err instanceof Error ? err.message : 'Failed to load messages'}
-        />
+      <div className="flex h-[calc(100vh-6rem)] items-center justify-center text-zinc-500">
+        Loading...
       </div>
     );
   }
 
   return (
-    <div className="space-y-2">
-      <h2 className="text-xl font-bold">Chat</h2>
-      {!data.group_jid && (
-        <div className="text-sm text-zinc-500">
-          No main group registered. Send a message via WhatsApp first.
-        </div>
-      )}
-      <ChatWindow initialMessages={data.messages} />
+    <div className="flex h-[calc(100vh-6rem)] -m-6">
+      <TopicSidebar
+        initialTopics={topics}
+        activeTopicId={activeTopicId}
+        onSelectTopic={handleSelectTopic}
+        onNewTopic={handleNewTopic}
+      />
+      <div className="flex-1">
+        <ChatWindow topicId={activeTopicId} group={activeGroup} />
+      </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-[calc(100vh-6rem)] items-center justify-center text-zinc-500">
+          Loading...
+        </div>
+      }
+    >
+      <ChatPageInner />
+    </Suspense>
   );
 }

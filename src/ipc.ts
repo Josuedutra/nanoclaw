@@ -9,7 +9,7 @@ import {
   MAIN_GROUP_FOLDER,
   TIMEZONE,
 } from './config.js';
-import { AvailableGroup } from './container-runner.js';
+import { AvailableGroup } from './process-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { processExtAccessIpc } from './ext-broker.js';
 import { processGovIpc } from './gov-ipc.js';

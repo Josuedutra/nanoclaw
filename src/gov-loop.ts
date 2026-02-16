@@ -22,7 +22,7 @@ import {
   ContainerOutput,
   runContainerAgent,
   writeTasksSnapshot,
-} from './container-runner.js';
+} from './process-runner.js';
 import {
   getAllActiveCapabilities,
 } from './ext-broker-db.js';
@@ -52,6 +52,7 @@ import { GATE_APPROVER } from './governance/gates.js';
 import type { GateType } from './governance/gates.js';
 import { validateTransition } from './governance/policy.js';
 import type { GovTask } from './governance/constants.js';
+import { getMemoriesBySourceRef } from './memory-db.js';
 import { recallRelevantMemory } from './memory/recall.js';
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
@@ -468,7 +469,7 @@ export function buildTaskContext(taskId: string, maxActivities = 20): string {
   return sections.join('\n');
 }
 
-function buildGovTaskPrompt(task: GovTask): string {
+export function buildGovTaskPrompt(task: GovTask): string {
   const lines = [
     `You have a governance task assigned:`,
     `- ID: ${task.id}`,
@@ -495,14 +496,14 @@ function buildGovTaskPrompt(task: GovTask): string {
     lines.push(context);
   }
 
-  // Sprint 4: Inject relevant memories
+  // Sprint 4: Inject relevant memories (increased to 10 for richer context)
   const memResult = recallRelevantMemory({
     query: task.title + ' ' + (task.description || ''),
     accessor_group: task.assigned_group || 'main',
     accessor_is_main: (task.assigned_group || 'main') === MAIN_GROUP_FOLDER,
     scope: task.scope,
     product_id: task.product_id,
-    limit: 5,
+    limit: 10,
   });
   if (memResult.memories.length > 0) {
     lines.push('');
@@ -515,7 +516,17 @@ function buildGovTaskPrompt(task: GovTask): string {
   }
 
   lines.push('');
-  lines.push('When you finish, use the gov_transition tool to move this task to REVIEW with a summary of what you did.');
+  lines.push('## Before starting');
+  lines.push('1. Read working.md — update current task');
+  lines.push('2. recall_memory with keywords from task title');
+  lines.push('3. Check conversations/ for related past work');
+  lines.push('');
+  lines.push('## After completing');
+  lines.push('1. Use store_memory for reusable knowledge (L0 for all agents, L1 for your notes)');
+  lines.push(`2. Include source_ref with task ID: ${task.id}`);
+  lines.push('3. Update working.md with completion status');
+  lines.push('4. Then gov_transition to REVIEW with summary');
+  lines.push('');
   lines.push('If you are blocked, move it to BLOCKED with a reason.');
 
   return lines.join('\n');
@@ -593,14 +604,14 @@ export function buildContextPack(task: GovTask): string {
     sections.push('');
   }
 
-  // Sprint 4: Inject relevant memories for reviewer context
+  // Sprint 4: Inject relevant memories for reviewer context (increased to 10)
   const memResult = recallRelevantMemory({
     query: task.title + ' ' + (task.description || ''),
     accessor_group: task.assigned_group || 'main',
     accessor_is_main: (task.assigned_group || 'main') === MAIN_GROUP_FOLDER,
     scope: task.scope,
     product_id: task.product_id,
-    limit: 5,
+    limit: 10,
   });
   if (memResult.memories.length > 0) {
     sections.push('## Relevant Memories');
@@ -612,10 +623,22 @@ export function buildContextPack(task: GovTask): string {
     sections.push('');
   }
 
+  // Cross-agent handoff: include task-specific memories stored by the developer
+  const devLearnings = getMemoriesBySourceRef(task.id, 10);
+  if (devLearnings.length > 0) {
+    sections.push('## Developer Learnings (from task execution)');
+    for (const m of devLearnings) {
+      sections.push(
+        `- ${m.content.slice(0, 300)}${m.content.length > 300 ? '...' : ''}`,
+      );
+    }
+    sections.push('');
+  }
+
   return sections.join('\n');
 }
 
-function buildApprovalPrompt(task: GovTask, gate: string): string {
+export function buildApprovalPrompt(task: GovTask, gate: string): string {
   const lines = [
     `A governance task requires your ${gate} gate approval:`,
     '',
@@ -634,6 +657,10 @@ function buildApprovalPrompt(task: GovTask, gate: string): string {
   lines.push(`1. APPROVE: Use gov_approve for the ${gate} gate, then gov_transition to DONE`);
   lines.push(`2. BLOCK: Use gov_transition to BLOCKED with an explicit reason`);
   lines.push(`3. REWORK: Use gov_transition back to DOING with an explicit reason for the developer`);
+  lines.push('');
+  lines.push('## After reviewing');
+  lines.push('Store security insights as memories (L0 for general patterns, L1 for review notes).');
+  lines.push(`Include source_ref: ${task.id}`);
 
   return lines.join('\n');
 }
