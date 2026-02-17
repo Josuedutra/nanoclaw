@@ -98,9 +98,15 @@ function setupWorkspace(
     fs.mkdirSync(globalDir, { recursive: true });
   }
 
-  // Per-group Claude sessions directory
+  // Per-group Claude sessions directory (agent user must own for token refresh)
   const groupSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude');
+  const sessionHomeDir = path.join(DATA_DIR, 'sessions', group.folder);
   fs.mkdirSync(groupSessionsDir, { recursive: true });
+  // Ensure agent user owns HOME and .claude/ so SDK can write session data
+  const agentUid = parseInt(process.env.AGENT_UID || '999', 10);
+  const agentGid = parseInt(process.env.AGENT_GID || '987', 10);
+  fs.chownSync(sessionHomeDir, agentUid, agentGid);
+  fs.chownSync(groupSessionsDir, agentUid, agentGid);
 
   // Write default settings.json if missing
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
@@ -114,11 +120,15 @@ function setupWorkspace(
     }, null, 2) + '\n');
   }
 
-  // Sync fresh OAuth credentials from root's Claude config
+  // Sync fresh OAuth credentials from root's Claude config.
+  // chown to agent user so the child process (spawned with uid/gid, no
+  // supplementary groups) can read and refresh the token.
   const rootCreds = path.join(process.env.HOME || '/root', '.claude', '.credentials.json');
   const sessionCreds = path.join(groupSessionsDir, '.credentials.json');
   if (fs.existsSync(rootCreds)) {
     fs.copyFileSync(rootCreds, sessionCreds);
+    fs.chownSync(sessionCreds, agentUid, agentGid);
+    fs.chmodSync(sessionCreds, 0o600);
   }
 
   // Sync skills (with per-group filtering)
@@ -229,8 +239,8 @@ export async function runContainerAgent(
 
     // Pass secrets via stdin (never written to disk)
     input.secrets = readSecrets();
-    child.stdin.write(JSON.stringify(input));
-    child.stdin.end();
+    child.stdin!.write(JSON.stringify(input));
+    child.stdin!.end();
     delete input.secrets;
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
@@ -238,7 +248,7 @@ export async function runContainerAgent(
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
 
-    child.stdout.on('data', (data) => {
+    child.stdout!.on('data', (data) => {
       const chunk = data.toString();
 
       if (!stdoutTruncated) {
@@ -286,7 +296,7 @@ export async function runContainerAgent(
       }
     });
 
-    child.stderr.on('data', (data) => {
+    child.stderr!.on('data', (data) => {
       const chunk = data.toString();
       const lines = chunk.trim().split('\n');
       for (const line of lines) {

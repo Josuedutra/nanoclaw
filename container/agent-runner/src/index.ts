@@ -729,7 +729,21 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      let queryResult: Awaited<ReturnType<typeof runQuery>>;
+      try {
+        queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      } catch (queryErr) {
+        const msg = queryErr instanceof Error ? queryErr.message : String(queryErr);
+        // If resume fails with auth/session error, retry with a fresh session
+        if (sessionId && (msg.includes('authentication') || msg.includes('Not logged in') || msg.includes('authToken'))) {
+          log(`Session resume failed (${msg}), retrying with fresh session...`);
+          sessionId = undefined;
+          resumeAt = undefined;
+          queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+        } else {
+          throw queryErr;
+        }
+      }
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
