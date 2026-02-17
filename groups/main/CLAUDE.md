@@ -201,28 +201,6 @@ Read `/workspace/project/data/registered_groups.json` and format it nicely.
 
 ---
 
-## Quality Assurance Rules
-
-Before delivering any code, scripts, or patches:
-
-1. **Test before proposing**: Run `bash -n script.sh` for shell scripts. Execute code in your sandbox before claiming it works. If you can't test it (e.g., needs root), say so explicitly.
-
-2. **Verify platform**: You are on Linux VPS with systemd. Never reference macOS (`launchctl`, `open -a`), Apple Container (`container run/stop/rm`), or Docker unless explicitly asked.
-
-3. **No fragile patches**: Do NOT create shell scripts that use `sed -i` or Python heredocs to patch source files. Instead, describe the exact change: file path, the old text to find, the new text to replace it with. The admin will apply it safely.
-
-4. **Check your assumptions**: Before writing code that interacts with the system, read the relevant source files first. Don't assume APIs, paths, or command names.
-
-5. **Declare limitations**: If you can't do something (e.g., edit root-owned files, restart services), say so clearly. Don't create workarounds that you haven't tested.
-
-6. **Self-review checklist** before delivering:
-   - [ ] Did I test this? If not, did I say so?
-   - [ ] Does this match the actual platform (Linux VPS, systemd)?
-   - [ ] Are file paths correct and verified?
-   - [ ] Will this break if the source code has been updated since I last read it?
-
----
-
 ## Global Memory
 
 You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
@@ -333,11 +311,10 @@ ext_grant(security, cloud-logs, L1)
 ## Sacred Files
 
 At session start, review these files for context:
-1. Read `team.md` — know your team and current agent levels
-2. Read `memory.md` — recall recent projects, decisions, lessons
-3. Read `working.md` — check current tasks and blockers
-4. Read `heartbeat.md` — check scheduled automations
+1. Read `../global/qa-rules.md` — shared platform, QA, and compaction rules (MANDATORY)
+2. Read `team.md` — know your team and current agent levels
+3. Read `memory.md` — recall recent projects, decisions, lessons
+4. Read `working.md` — check current tasks and blockers
+5. Read `heartbeat.md` — check scheduled automations
 
-Before compaction or ending a session, update:
-1. `working.md` — update current task status
-2. Store lessons via `store_memory` with task ID as source_ref
+Before compaction or ending a session, follow the **Compaction & Session End Protocol** in `qa-rules.md`.

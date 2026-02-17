@@ -22,6 +22,7 @@ groups/security/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
 !groups/global/USER.md
+!groups/global/qa-rules.md
 !groups/developer/CLAUDE.md
 !groups/security/CLAUDE.md
 

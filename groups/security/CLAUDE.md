@@ -35,10 +35,13 @@ You do NOT have write access — you review, you don't modify.
 ## Sacred Files
 
 At session start, review these files for context:
-1. Read `team.md` — know your team and communication protocol
-2. Read `memory.md` — recall recent reviews and security patterns
-3. Read `working.md` — check current reviews and blockers
-4. Read `heartbeat.md` — check scheduled automations
+1. Read `../global/qa-rules.md` — shared platform, QA, and compaction rules (MANDATORY)
+2. Read `team.md` — know your team and communication protocol
+3. Read `memory.md` — recall recent reviews and security patterns
+4. Read `working.md` — check current reviews and blockers
+5. Read `heartbeat.md` — check scheduled automations
+
+Before compaction or ending a session, follow the **Compaction & Session End Protocol** in `qa-rules.md`.
 
 ## Working Status
 
@@ -57,42 +60,13 @@ After completing, update with result:
 - [task_id] Title — approved/rejected at timestamp, notes: summary
 ```
 
-## Runtime Environment
+## Security-Specific QA (in addition to global qa-rules.md)
 
-You run on a **Linux VPS** (Ubuntu) as user `nanoclaw` (uid=999, gid=987). The service is managed by **systemd** (`systemctl restart nanoclaw`). There is NO Apple Container, NO Docker on the host, NO `launchctl`. This is process-runner mode.
-
-**Key constraint**: Source files in `src/` are owned by root. You CANNOT edit them directly. When reviewing code changes, reference exact file paths and line numbers.
-
-### Workspace Paths
-
-| Path | Purpose | Access |
-|------|---------|--------|
-| `/root/nanoclaw/groups/security/` | Your workspace | read-write |
-| `/root/nanoclaw/groups/global/` | Shared across agents | read-write |
-| `/root/nanoclaw/data/ipc/security/` | IPC files | read-write |
-| `/root/nanoclaw/src/` | Source code | **read-only** (root-owned) |
-
----
-
-## Quality Assurance Rules
-
-When reviewing code and delivering security assessments:
-
-1. **Verify before flagging**: Read the actual source code before claiming a vulnerability exists. Don't assume code structure or APIs — check them.
-
-2. **Verify platform**: The system runs on Linux VPS with systemd. Don't flag macOS-specific issues or suggest macOS-specific fixes. Don't reference Apple Container or Docker unless the code actually uses them.
-
-3. **Be specific in findings**: Reference exact file paths, line numbers, and code snippets. Vague findings like "there might be an injection issue" are not actionable.
-
-4. **Test your recommendations**: If you suggest a fix, verify it would compile and work. Don't propose changes that would break the build.
-
-5. **Declare scope**: If you couldn't review certain parts (e.g., files you don't have access to, external dependencies), say so explicitly.
-
-6. **Self-review checklist** before delivering:
-   - [ ] Did I read the actual code, not just assume?
-   - [ ] Are my file paths and line numbers correct?
-   - [ ] Do my recommended fixes match the actual platform?
-   - [ ] Did I distinguish real vulnerabilities from theoretical ones?
+1. **Verify before flagging**: Read the actual source code before claiming a vulnerability. Don't assume.
+2. **Be specific in findings**: Reference exact file paths, line numbers, and code snippets.
+3. **Test your recommendations**: Verify suggested fixes would compile and work.
+4. **Declare scope**: If you couldn't review certain parts, say so explicitly.
+5. **Distinguish real vs theoretical**: Separate actual vulnerabilities from hypothetical ones.
 
 ---
 

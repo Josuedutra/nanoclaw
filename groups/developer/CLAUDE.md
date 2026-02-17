@@ -36,10 +36,13 @@ You do NOT have production (L3) access — merges and deploys require the coordi
 ## Sacred Files
 
 At session start, review these files for context:
-1. Read `team.md` — know your team and communication protocol
-2. Read `memory.md` — recall recent projects, decisions, lessons
-3. Read `working.md` — check current tasks and blockers
-4. Read `heartbeat.md` — check scheduled automations
+1. Read `../global/qa-rules.md` — shared platform, QA, and compaction rules (MANDATORY)
+2. Read `team.md` — know your team and communication protocol
+3. Read `memory.md` — recall recent projects, decisions, lessons
+4. Read `working.md` — check current tasks and blockers
+5. Read `heartbeat.md` — check scheduled automations
+
+Before compaction or ending a session, follow the **Compaction & Session End Protocol** in `qa-rules.md`.
 
 ## Working Status
 
@@ -63,45 +66,6 @@ If blocked, update:
 ## Blockers
 - [task_id] Reason for block
 ```
-
-## Runtime Environment
-
-You run on a **Linux VPS** (Ubuntu) as user `nanoclaw` (uid=999, gid=987). The service is managed by **systemd** (`systemctl restart nanoclaw`). There is NO Apple Container, NO Docker on the host, NO `launchctl`. This is process-runner mode.
-
-**Key constraint**: Source files in `src/` are owned by root. You CANNOT edit them directly. When you need code changes, describe the exact changes needed (file, line, old text, new text) and the coordinator will apply them. Do NOT create shell scripts with sed/python patches — they are fragile and error-prone.
-
-### Workspace Paths
-
-| Path | Purpose | Access |
-|------|---------|--------|
-| `/root/nanoclaw/groups/developer/` | Your workspace | read-write |
-| `/root/nanoclaw/groups/global/` | Shared across agents | read-write |
-| `/root/nanoclaw/data/ipc/developer/` | IPC files | read-write |
-| `/root/nanoclaw/src/` | Source code | **read-only** (root-owned) |
-
----
-
-## Quality Assurance Rules
-
-Before delivering any code, scripts, patches, or review results:
-
-1. **Test before delivering**: Run `bash -n script.sh` for shell scripts. Execute code in your sandbox before claiming it works. If you can't test it (e.g., needs root), say so explicitly.
-
-2. **Verify platform**: You are on Linux VPS with systemd. Never reference macOS (`launchctl`, `open -a`), Apple Container (`container run/stop/rm`), or Docker unless explicitly asked.
-
-3. **No fragile patches**: Do NOT create shell scripts that use `sed -i` or Python heredocs to patch source files. Instead, describe the exact change: file path, the old text to find, the new text to replace it with. The admin/coordinator will apply it safely.
-
-4. **Check your assumptions**: Before writing code that interacts with the system, read the relevant source files first. Don't assume APIs, paths, or command names.
-
-5. **Declare limitations**: If you can't do something (e.g., edit root-owned files, restart services), say so clearly. Don't create workarounds that you haven't tested.
-
-6. **Self-review checklist** before delivering:
-   - [ ] Did I test this? If not, did I say so?
-   - [ ] Does this match the actual platform (Linux VPS, systemd)?
-   - [ ] Are file paths correct and verified?
-   - [ ] Will this break if the source code has been updated since I last read it?
-
----
 
 ## Learning & Memory
 
