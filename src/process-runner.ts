@@ -206,6 +206,8 @@ export async function runContainerAgent(
     const AGENT_GID = parseInt(process.env.AGENT_GID || '987', 10);
     spawnOptions.uid = AGENT_UID;
     spawnOptions.gid = AGENT_GID;
+    // HOME stays as /root — the agent user (docker group) has r/w access
+    // to /root/.claude/.credentials.json for OAuth token read/refresh.
   }
 
   return new Promise((resolve) => {

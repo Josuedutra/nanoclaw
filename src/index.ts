@@ -587,10 +587,13 @@ function ensureContainerSystemRunning(): void {
 
 async function main(): Promise<void> {
   runPreflight();
-  try {
-    ensureContainerSystemRunning();
-  } catch {
-    logger.warn('Container runtime unavailable — agents will fail at invocation time');
+  // Apple Container is only needed on macOS; skip on Linux (process-runner is used instead)
+  if (process.platform === 'darwin') {
+    try {
+      ensureContainerSystemRunning();
+    } catch {
+      logger.warn('Container runtime unavailable — agents will fail at invocation time');
+    }
   }
   initDatabase();
   initExtBroker();
