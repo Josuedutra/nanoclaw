@@ -105,13 +105,18 @@ You are responsible for keeping the system healthy, current, and secure. Run the
 
 ### Steps
 
-1. **For each agent group** (main, developer, security):
+1. **For each registered agent group** (query DB, not hardcoded):
+   ```bash
+   sqlite3 /root/nanoclaw/store/messages.db "SELECT folder, name FROM registered_groups ORDER BY folder"
+   ```
+   For each group folder, check:
    - Read `CLAUDE.md` — does it reference correct paths? Is platform info current?
-   - Read `team.md` — does it match actual agent roster?
+   - Read `team.md` — does it match actual agent roster? Is the symlink valid?
    - Read `tools.md` — does it document all available MCP tools?
    - Read `memory.md` — is the index up to date?
    - Read `working.md` — any stale "Current Task" entries?
    - Read `heartbeat.md` — are scheduled tasks still relevant?
+   - Verify `memory/daily/` and `memory/topics/` directories exist
 
 2. **Check qa-rules.md** (`groups/global/qa-rules.md`):
    - Still matches current platform? (Linux VPS, systemd, paths)
